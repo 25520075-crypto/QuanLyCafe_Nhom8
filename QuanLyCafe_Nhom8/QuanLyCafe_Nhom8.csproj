@@ -88,7 +88,9 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="BLL\" />
-    <Folder Include="Database\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Database\script.sql" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

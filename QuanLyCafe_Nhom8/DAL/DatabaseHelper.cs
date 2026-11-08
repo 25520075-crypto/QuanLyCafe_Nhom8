@@ -6,7 +6,7 @@ namespace QuanLyCafe_Nhom8.DAL
 {
     public static class DatabaseHelper
     {
-        public static string ConnectionString = "Data Source=.;Initial Catalog=CafePOS_DB;Integrated Security=True;TrustServerCertificate=True";
+        public static string ConnectionString = "Data Source=.;Initial Catalog=CAFE;Integrated Security=True;TrustServerCertificate=True";
 
         public static SqlConnection GetConnection()
         {
