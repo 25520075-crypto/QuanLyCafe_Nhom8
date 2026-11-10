@@ -9,6 +9,7 @@ namespace QuanLyCafe_Nhom8.GUI
 {
     public partial class FrmKDS : Form
     {
+        // Khai báo lớp truy xuất dữ liệu POS và bộ đếm thời gian làm mới tự động
         private readonly PosServiceDAL _posDal = new PosServiceDAL();
         private DataGridView dgvPending;
         private Button btnCompleteItem;
@@ -24,6 +25,7 @@ namespace QuanLyCafe_Nhom8.GUI
             StartAutoRefresh();
         }
 
+        // Thiết kế giao diện Màn hình Quầy Pha Chế (KDS)
         private void BuildKdsInterface()
         {
             this.Text = "Màn hình Quầy Pha Chế Real-time (KDS) - Nhóm 8";
@@ -76,7 +78,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnCompleteItem = new Button
             {
-                Text = "HOÀN THÀNH & GIAO MÓN ĐANG CHỌN",
+                Text = "✔ HOÀN THÀNH & GIAO MÓN ĐANG CHỌN",
                 Location = new Point(20, 495),
                 Size = new Size(650, 48),
                 BackColor = Color.FromArgb(39, 174, 96),
@@ -90,7 +92,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnRefresh = new Button
             {
-                Text = "Làm mới ngay",
+                Text = "🔄 Làm mới ngay",
                 Location = new Point(685, 495),
                 Size = new Size(200, 48),
                 BackColor = Color.FromArgb(109, 76, 65),
@@ -108,6 +110,7 @@ namespace QuanLyCafe_Nhom8.GUI
             this.Controls.Add(btnRefresh);
         }
 
+        // Khởi tạo Timer tự động làm mới danh sách món chờ pha chế mỗi 3 giây (3000ms)
         private void StartAutoRefresh()
         {
             _refreshTimer = new Timer { Interval = 3000 };
@@ -115,6 +118,7 @@ namespace QuanLyCafe_Nhom8.GUI
             _refreshTimer.Start();
         }
 
+        // Tải danh sách các món có trạng thái 'Chờ pha chế' từ CSDL lên bảng
         private void LoadPendingOrders()
         {
             DataTable dt = _posDal.GetPendingKitchenItems();
@@ -122,6 +126,7 @@ namespace QuanLyCafe_Nhom8.GUI
             lblCount.Text = $"Đang chờ: {dt.Rows.Count} món";
         }
 
+        // Sự kiện khi nhân viên pha chế bấm nút Hoàn thành món
         private void btnCompleteItem_Click(object sender, EventArgs e)
         {
             if (dgvPending.CurrentRow == null)
@@ -130,16 +135,19 @@ namespace QuanLyCafe_Nhom8.GUI
                 return;
             }
 
-            int billDetailId = Convert.ToInt32(dgvPending.CurrentRow.Cells["Mã"].Value);
-            string productName = dgvPending.CurrentRow.Cells["Tên món cần pha"].Value.ToString();
-            string tableName = dgvPending.CurrentRow.Cells["Bàn"].Value.ToString();
+            // Lấy Mã chi tiết hóa đơn (cột 0), Tên Bàn/Đơn (cột 1) và Tên món (cột 2)
+            int billDetailId = Convert.ToInt32(dgvPending.CurrentRow.Cells[0].Value);
+            string tableName = dgvPending.CurrentRow.Cells[1].Value.ToString();
+            string productName = dgvPending.CurrentRow.Cells[2].Value.ToString();
 
+            // Cập nhật trạng thái món sang 'Đã phục vụ' trong SQL Server
             _posDal.MarkKitchenItemDone(billDetailId);
             SmartPaymentService.PlaySuccessSound();
             LoadPendingOrders();
-            MessageBox.Show($"Đã hoàn thành món [{productName}] cho {tableName}!", "Quầy Bar", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show($"Đã hoàn thành món [{productName}] cho [{tableName}]!", "Quầy Bar", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
+        // Dừng Timer khi đóng màn hình KDS để giải phóng bộ nhớ
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             _refreshTimer?.Stop();
