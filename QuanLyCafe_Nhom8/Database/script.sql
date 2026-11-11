@@ -1,5 +1,5 @@
 -- =========================================================================
--- KỊCH BẢN KHỞI TẠO CƠ SỞ DỮ LIỆU QUẢN LÝ QUÁN CAFE (CHUẨN 3NF - 7 BẢNG)
+-- KHỞI TẠO CƠ SỞ DỮ LIỆU QUẢN LÝ QUÁN CAFE (CHUẨN 3NF - 7 BẢNG)
 -- Đồ án Lập trình C# WinForms - Nhóm 8
 -- =========================================================================
 
@@ -104,7 +104,7 @@ INSERT INTO Products (CategoryId, ProductName, Price, ImagePath) VALUES
 (1, N'Cà phê Đen Đá', 25000, 'Assets/Images/cf_den.png'),
 (1, N'Cà phê Sữa Đá', 29000, 'Assets/Images/cf_sua.png'),
 (1, N'Bạc Xỉu', 32000, 'Assets/Images/bac_xiu.png'),
-(2, N'Trà Đào Cam Sả', 39000, 'Assets/Images/tra_dao.png'),
+(2, N'Trà Đào Cam Sả', 39000, 'Assets/Images/tra_dao.png'),u
 (3, N'Matcha Đá Xay', 45000, 'Assets/Images/matcha.png');
 
 -- Danh sách bàn phục vụ tại quán + Mua mang về + ShopeeFood/XanhSM + GrabFood

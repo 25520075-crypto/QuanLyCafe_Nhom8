@@ -59,7 +59,7 @@ namespace QuanLyCafe_Nhom8.GUI
         // Hàm dựng toàn bộ bố cục giao diện 3 cột theo tông màu Quán Cafe Hiện Đại
         private void BuildModernPosInterface()
         {
-            this.Text = "Hệ thống POS Quản lý Quán Cafe Thông Minh - Nhóm 8";
+            this.Text = "Hệ thống Quản lý Quán Cafe Thông Minh - Nhóm 8";
             this.Size = new Size(1350, 805);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = Color.FromArgb(244, 239, 234);
@@ -75,14 +75,14 @@ namespace QuanLyCafe_Nhom8.GUI
 
             Label lblBrand = new Label
             {
-                Text = "☕ HIGHLAND COFFEE POS - NHÓM 8",
+                Text = "☕ COFFEE FEFA - NHÓM 8",
                 Font = new Font("Segoe UI", 14, FontStyle.Bold),
                 ForeColor = Color.FromArgb(255, 224, 178),
                 Location = new Point(18, 15),
                 AutoSize = true
             };
 
-            Button btnOpenKDS = CreateHeaderButton("🔔 Màn hình Pha chế (KDS)", new Point(630, 11), Color.FromArgb(211, 84, 0));
+            Button btnOpenKDS = CreateHeaderButton("🔔 Màn hình Pha chế ", new Point(630, 11), Color.FromArgb(211, 84, 0));
             btnOpenKDS.Click += (s, e) =>
             {
                 FrmKDS kdsForm = new FrmKDS();
@@ -135,7 +135,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnTabDineIn = CreateTabButton("Tại quán", new Point(12, 38), 98, () => SwitchChannelTab("DINE_IN"));
             btnTabTakeAway = CreateTabButton("Mang về", new Point(114, 38), 98, () => SwitchChannelTab("TAKE_AWAY"));
-            btnTabShopeeXanh = CreateTabButton("Shopee & XanhSM", new Point(216, 38), 130, () => SwitchChannelTab("SHOPEE_XANH"));
+            btnTabShopeeXanh = CreateTabButton("Shopee && XanhSM", new Point(216, 38), 130, () => SwitchChannelTab("SHOPEE_XANH"));
             btnTabGrab = CreateTabButton("GrabFood", new Point(350, 38), 93, () => SwitchChannelTab("GRAB"));
 
             flpTables = new FlowLayoutPanel
@@ -148,7 +148,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnMoveTable = new Button
             {
-                Text = "⇄ Chuyển bàn (Mở bảng chọn bàn Trống)",
+                Text = "⇄ Chuyển bàn ",
                 Location = new Point(12, 608),
                 Size = new Size(210, 52),
                 BackColor = Color.FromArgb(41, 128, 185),
@@ -162,7 +162,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnMergeTable = new Button
             {
-                Text = "⊕ Gộp bàn (Mở bảng chọn bàn Có khách)",
+                Text = "⊕ Gộp bàn ",
                 Location = new Point(233, 608),
                 Size = new Size(210, 52),
                 BackColor = Color.FromArgb(142, 68, 173),
@@ -266,7 +266,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnSendKitchen = new Button
             {
-                Text = "📨 GỬI PHA CHẾ (Sau khi đã đọc lại order cho khách xác nhận)",
+                Text = "📨 GỬI PHA CHẾ ",
                 Location = new Point(15, 512),
                 Size = new Size(485, 38),
                 BackColor = Color.FromArgb(41, 128, 185),
@@ -280,7 +280,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnRemoveItem = new Button
             {
-                Text = "🗑 Hủy món (Cần Quản lý)",
+                Text = "🗑 Hủy món ",
                 Location = new Point(15, 558),
                 Size = new Size(205, 36),
                 BackColor = Color.FromArgb(192, 57, 43),
@@ -398,7 +398,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnPrintBill = new Button
             {
-                Text = "🖨 Xem & In Bill Tính Tiền (Kèm QR)",
+                Text = "🖨 Xem & In Bill Tính Tiền ",
                 Location = new Point(18, 434),
                 Size = new Size(276, 40),
                 BackColor = Color.FromArgb(39, 174, 96),
@@ -437,7 +437,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnConfirmPayment = new Button
             {
-                Text = "2. XÁC NHẬN ĐÃ NHẬN TIỀN\n(Làm trống bàn / Hoàn tất đơn)",
+                Text = "2. XÁC NHẬN ĐÃ NHẬN TIỀN\n",
                 Location = new Point(18, 552),
                 Size = new Size(276, 60),
                 BackColor = Color.FromArgb(211, 84, 0),
@@ -660,7 +660,7 @@ namespace QuanLyCafe_Nhom8.GUI
             approvedBy = "";
             using (Form authForm = new Form())
             {
-                authForm.Text = "Yêu cầu Quản lý (Admin) phê duyệt";
+                authForm.Text = "Yêu cầu Quản lý phê duyệt";
                 authForm.Size = new Size(420, 250);
                 authForm.StartPosition = FormStartPosition.CenterParent;
                 authForm.FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -753,7 +753,7 @@ namespace QuanLyCafe_Nhom8.GUI
                 }
 
                 MessageBox.Show(
-                    "Sai mật khẩu hoặc tài khoản không phải Quản lý (Admin)!\n(Gợi ý khi chạy Demo: TK 'admin' / MK 'admin123')",
+                    "Sai mật khẩu hoặc tài khoản không phải Quản lý !\n(Gợi ý khi chạy Demo: TK 'admin' / MK 'admin123')",
                     "Từ chối phê duyệt",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
@@ -783,8 +783,8 @@ namespace QuanLyCafe_Nhom8.GUI
                 Label lblInstruction = new Label
                 {
                     Text = isMoveToEmptyMode
-                        ? $"Đang chuyển từ [{_selectedTableName}] -> Hãy bấm vào 1 bàn TRỐNG bên dưới (Sẽ hiện dấu tích xanh ✔):"
-                        : $"Đang gộp từ [{_selectedTableName}] -> Hãy bấm vào 1 bàn ĐANG CÓ KHÁCH bên dưới (Sẽ hiện dấu tích xanh ✔):",
+                        ? $"Đang chuyển từ [{_selectedTableName}] "
+                        : $"Đang gộp từ [{_selectedTableName}] ",
                     Font = new Font("Segoe UI", 10f, FontStyle.Bold),
                     ForeColor = Color.FromArgb(62, 39, 35),
                     Location = new Point(15, 12),
@@ -959,7 +959,7 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 SmartPaymentService.PlaySuccessSound();
                 LoadBillForSelectedTable();
-                MessageBox.Show($"Đã gửi {sentCount} dòng món của [{_selectedTableName}] xuống màn hình Quầy Pha Chế (KDS)!", "Đã gửi pha chế", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show($"Đã gửi {sentCount} nước của [{_selectedTableName}] ", "Đã gửi pha chế", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             else
             {
@@ -1119,7 +1119,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
                 StringBuilder sb = new StringBuilder();
                 sb.AppendLine("       HIGHLAND COFFEE POS - NHÓM 8");
-                sb.AppendLine("     ĐC: Khu Công Nghệ Cao, Đồng Nai");
+                sb.AppendLine("     ĐC: Công Viên Thủy Tinh, Thủ Đức");
                 sb.AppendLine("==========================================");
                 sb.AppendLine($"        PHIẾU TẠM TÍNH / HÓA ĐƠN");
                 sb.AppendLine($"Bàn / Đơn : {_selectedTableName}");
