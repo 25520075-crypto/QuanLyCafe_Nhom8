@@ -466,5 +466,10 @@ namespace QuanLyCafe_Nhom8.GUI
                 ShowError("Lỗi khi thanh toán: " + ex.Message);
             }
         }
+
+        private void FrmMainPOS_Load(object sender, EventArgs e)
+        {
+
+        }
     }
 }

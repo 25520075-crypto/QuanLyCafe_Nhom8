@@ -11,7 +11,7 @@ namespace QuanLyCafe_Nhom8
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new FrmMainPOS());
+            Application.Run(new FrmAuth());
         }
     }
 }

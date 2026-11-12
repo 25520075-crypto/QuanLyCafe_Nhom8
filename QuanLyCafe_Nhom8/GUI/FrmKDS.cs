@@ -153,5 +153,10 @@ namespace QuanLyCafe_Nhom8.GUI
             _refreshTimer?.Stop();
             base.OnFormClosing(e);
         }
+
+        private void FrmKDS_Load(object sender, EventArgs e)
+        {
+
+        }
     }
 }
