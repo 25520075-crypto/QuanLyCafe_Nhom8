@@ -137,8 +137,14 @@ namespace QuanLyCafe_Nhom8.GUI
                 LoadBillForSelectedTable();
             });
 
-            Button btnOpenMenu = MakeButton("📋 Quản lý Thực đơn", new Point(855, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
-                Info("Module Quản lý Thực đơn (FrmMenuManager) do Tuấn Anh phụ trách sẽ được gắn vào nút này khi Merge nhánh!", "Thông tin Module"));
+            Button btnOpenMenu = MakeButton("📋 Quản lý Thực đơn", new Point(855, 11), new Size(205, 38), Theme.Green, (s, e) =>
+            {
+                using (FrmMenuManager menuForm = new FrmMenuManager())
+                {
+                    menuForm.ShowDialog(this);
+                }
+                LoadAllProducts();
+            });
 
             Button btnOpenStats = MakeButton("📊 Thống kê & Telegram", new Point(1070, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
             {
