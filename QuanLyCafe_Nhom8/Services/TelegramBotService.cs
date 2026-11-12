@@ -9,7 +9,7 @@ namespace QuanLyCafe_Nhom8.Services
     public class TelegramBotService
     {
         private readonly string botToken = "9079144131:AAH0X7MrQPP1xsoRV1KbW2L8Hmk7q0Eg7x4";
-        private readonly string chatId = "8786904627";
+        private readonly string chatId = "5939667192";
 
         public bool GuiTin(string text)
         {

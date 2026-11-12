@@ -78,6 +78,40 @@ namespace QuanLyCafe_Nhom8.GUI
             return Channel.DineIn;
         }
 
+        // Kiểm tra món trên dòng hiện tại đã gửi xuống quầy pha chế hay chưa
+        private bool IsItemSentToKitchen(DataGridViewRow row)
+        {
+            if (row == null) return false;
+
+            foreach (DataGridViewCell cell in row.Cells)
+            {
+                if (cell.Value == null) continue;
+
+                if (cell.Value is bool isSentBool)
+                {
+                    return isSentBool;
+                }
+
+                string val = cell.Value.ToString().Trim().ToLowerInvariant();
+
+                // Nếu trạng thái đang là nháp / chưa gửi -> chưa gửi pha chế
+                if (val.Contains("nháp") || val.Contains("chưa gửi") || val.Contains("mới gọi"))
+                {
+                    return false;
+                }
+
+                // Nếu trạng thái đã chuyển xuống bếp / pha chế / hoàn thành -> đã gửi pha chế
+                if (val.Contains("đã gửi") || val.Contains("chờ pha") || val.Contains("đang pha") ||
+                    val.Contains("đang làm") || val.Contains("hoàn thành") || val.Contains("đã xong") ||
+                    val.Contains("pha chế"))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         // ==================== XỬ LÝ SƠ ĐỒ BÀN & THỰC ĐƠN ====================
 
         private void SwitchChannelTab(Channel channel, bool reloadFromDb = false)
@@ -300,24 +334,47 @@ namespace QuanLyCafe_Nhom8.GUI
 
             int billDetailId = Convert.ToInt32(dgvBillDetails.CurrentRow.Cells["BillDetailId"].Value);
             string itemName = dgvBillDetails.CurrentRow.Cells["Tên món"].Value.ToString();
+            bool isSentToKitchen = IsItemSentToKitchen(dgvBillDetails.CurrentRow);
+            string managerName = "";
 
-            if (!RequestManagerApprovalDialog($"Hủy món [{itemName}] tại {_selectedTableName}", out string managerName))
+            // Chỉ món ĐÃ GỬI PHA CHẾ mới bắt buộc nhập tài khoản Quản lý/Admin để duyệt hủy.
+            // Món chưa gửi (nháp) -> xóa thẳng: không cần Admin, không hỏi xác nhận.
+            if (isSentToKitchen)
             {
-                return;
+                if (!RequestManagerApprovalDialog($"Hủy món ĐÃ GỬI PHA CHẾ [{itemName}] tại {_selectedTableName}", out managerName))
+                {
+                    return;
+                }
             }
 
             try
             {
                 _posDal.RemoveBillDetailItem(billDetailId, _selectedTableId);
                 RefreshAll();
-                Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).", "Đã hủy món");
+
+                // Chỉ món đã gửi pha chế mới báo Telegram + hiện thông báo.
+                // Món nháp: xóa xong chỉ làm mới bảng hóa đơn, không hiện thông báo nào.
+                if (isSentToKitchen)
+                {
+                    try
+                    {
+                        new TelegramBotService().GuiTin(
+                            $"⚠️ CẢNH BÁO HỦY MÓN ĐÃ PHA CHẾ:\n" +
+                            $"- Bàn/Đơn: {_selectedTableName}\n" +
+                            $"- Món hủy: {itemName}\n" +
+                            $"- Duyệt bởi: {managerName}\n" +
+                            $"- Thời gian: {DateTime.Now:HH:mm dd/MM/yyyy}");
+                    }
+                    catch { /* Bỏ qua lỗi mạng nếu không gửi được Telegram */ }
+
+                    Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).", "Đã hủy món");
+                }
             }
             catch (Exception ex)
             {
                 ShowError("Lỗi khi hủy món: " + ex.Message);
             }
         }
-
         private void btnApplyDiscount_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Bàn chưa có hóa đơn để áp dụng giảm giá!")) return;

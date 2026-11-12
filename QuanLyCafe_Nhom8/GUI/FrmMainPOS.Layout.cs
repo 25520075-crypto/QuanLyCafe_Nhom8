@@ -353,8 +353,8 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 "Tiền mặt",
                 "Chuyển khoản QR",
-                "Ví ShopeeFood / XanhSM",
-                "Ví GrabFood"
+                "ShopeeFood / XanhSM",
+                "GrabFood"
             });
             cboPaymentMethod.SelectedIndex = 0;
 
