@@ -592,23 +592,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 SizeF sz = g.MeasureString(sub, fSub);
                 g.DrawString(sub, fSub, subBrush, (w - sz.Width) / 2f, 78);
             }
-
-            // Thẻ gợi ý tài khoản 3D Glass ở đáy cột trái
-            Rectangle hintBox = new Rectangle(28, h - 82, w - 56, 54);
-            using (GraphicsPath hp = GetRoundedPath(hintBox, 14))
-            using (SolidBrush glass = new SolidBrush(Color.FromArgb(95, 0, 0, 0)))
-            using (Pen border = new Pen(Color.FromArgb(80, 255, 204, 128), 1f))
-            {
-                g.FillPath(glass, hp);
-                g.DrawPath(border, hp);
-            }
-
-            using (Font fHint = new Font("Segoe UI", 9f, FontStyle.Bold))
-            using (SolidBrush hintBrush = new SolidBrush(Color.FromArgb(255, 224, 178)))
-            {
-                g.DrawString("🔑 TK Quản lý (Admin): admin / admin123", fHint, hintBrush, 46, h - 74);
-                g.DrawString("👤 TK Thu ngân (Staff): thungan1 / staff123", fHint, hintBrush, 46, h - 52);
-            }
         }
 
         // ==================== 4. CARD ĐĂNG NHẬP & QUÊN MẬT KHẨU 3D NEUMORPHISM ====================
