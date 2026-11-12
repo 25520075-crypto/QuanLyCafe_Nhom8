@@ -275,7 +275,6 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 _cupPressDepth = 0;
                 pnlLeft3DStage.Invalidate();
-                PerformLogin();
             }
         }
 
@@ -460,7 +459,7 @@ namespace QuanLyCafe_Nhom8.GUI
             }
 
             // 8. Nhãn 3D phát sáng ngay trên thân ly
-            string cupLabel = _isCupHovered ? "⚡ CHẠM ĐỂ VÀO CA!" : "☕ CHẠM ĐỂ LOGIN";
+            string cupLabel = "☕ COFFEE FEFA";
             using (Font cupFont = new Font("Segoe UI", 9.5f, FontStyle.Bold))
             {
                 SizeF sz = g.MeasureString(cupLabel, cupFont);
@@ -585,7 +584,7 @@ namespace QuanLyCafe_Nhom8.GUI
                 }
             }
 
-            string sub = "Tương tác chuột 3D • Chạm Ly Cafe để vào Ca trực";
+            string sub = "Hệ thống Quản lý Quán Cafe Thông Minh - Nhóm 8";
             using (Font fSub = new Font("Segoe UI", 9.5f, FontStyle.Italic))
             using (SolidBrush subBrush = new SolidBrush(Color.FromArgb(215, 195, 185)))
             {
@@ -1541,7 +1540,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
         private void FrmAuth_Load(object sender, EventArgs e)
         {
-
+                
         }
     }
 }
