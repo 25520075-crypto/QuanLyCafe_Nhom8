@@ -147,8 +147,12 @@ namespace QuanLyCafe_Nhom8.GUI
             });
 
             Button btnOpenStats = MakeButton("📊 Thống kê & Telegram", new Point(1070, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
-                Info("Module Thống kê & Telegram Bot (FrmStatistics) do Ngô Việt Hưng phụ trách sẽ được gắn vào nút này khi Merge nhánh!", "Thông tin Module"));
-
+            {
+                using (FrmStatistics frm = new FrmStatistics())
+                {
+                    frm.ShowDialog(this);
+                }
+            });
             pnlTopHeader.Controls.AddRange(new Control[] { lblBrand, btnOpenKDS, btnOpenMenu, btnOpenStats });
 
             // 2. CỘT TRÁI: KÊNH BÁN HÀNG & SƠ ĐỒ BÀN
