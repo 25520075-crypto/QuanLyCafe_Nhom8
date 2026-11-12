@@ -28,3 +28,14 @@ namespace QuanLyCafe_Nhom8.DTO
         public decimal SubTotal => Quantity * UnitPrice;
     }
 }
+
+public class UserDTO
+{
+    public int UserId { get; set; }
+    public string Username { get; set; }
+    public string PasswordHash { get; set; }
+    public string FullName { get; set; }
+    public string Role { get; set; }
+    public bool IsActive { get; set; }
+    public string Email { get; set; }
+}
