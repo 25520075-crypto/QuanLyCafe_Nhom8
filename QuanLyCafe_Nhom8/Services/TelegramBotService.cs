@@ -16,7 +16,7 @@ namespace QuanLyCafe_Nhom8.Services
             try
             {
                 ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-                string url = $"https://api.telegram.org/bot{token}/sendMessage?chat_id={chatId}&text={Uri.EscapeDataString(text)}";
+                string url = $"https://api.telegram.org/bot{botToken}/sendMessage?chat_id={chatId}&text={Uri.EscapeDataString(text)}";
 
                 using (WebClient wc = new WebClient())
                 {
