@@ -579,8 +579,8 @@ namespace QuanLyCafe_Nhom8.GUI
         private string BuildReceiptText(DataTable dtItems, string method)
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("        HIGHLAND COFFEE POS - NHÓM 8");
-            sb.AppendLine("      ĐC: Công Viên Thủy Tinh, Thủ Đức");
+            sb.AppendLine("        CAFE FEFA - NHÓM 8");
+            sb.AppendLine("      ĐC: Công Viên Thủy Tinh ");
             sb.AppendLine("==========================================");
             sb.AppendLine("         PHIẾU TẠM TÍNH / HÓA ĐƠN");
             sb.AppendLine($"Bàn / Đơn : {_selectedTableName}");

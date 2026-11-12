@@ -38,6 +38,9 @@ namespace QuanLyCafe_Nhom8.GUI
             BuildModernPosInterface();
             LoadAllProducts();
             SwitchChannelTab(Channel.DineIn, reloadFromDb: true);
+
+            // Tự động bật luồng lắng nghe lệnh Telegram 2 chiều (/homnay, /homqua, /ban, /huymon)
+            new TelegramBotService().StartTwoWayListener();
         }
 
         // ==================== HÀM KIỂM TRA & LÀM MỚI DỮ LIỆU ====================
@@ -95,7 +98,7 @@ namespace QuanLyCafe_Nhom8.GUI
                 string val = cell.Value.ToString().Trim().ToLowerInvariant();
 
                 // Nếu trạng thái đang là nháp / chưa gửi -> chưa gửi pha chế
-                if (val.Contains("nháp") || val.Contains("chưa gửi") || val.Contains("mới gọi"))
+                if (val.Contains("nháp") || val.Contains("chưa gửi") || val.Contains("mới gọi") || val.Contains("chờ xác nhận"))
                 {
                     return false;
                 }
@@ -103,7 +106,7 @@ namespace QuanLyCafe_Nhom8.GUI
                 // Nếu trạng thái đã chuyển xuống bếp / pha chế / hoàn thành -> đã gửi pha chế
                 if (val.Contains("đã gửi") || val.Contains("chờ pha") || val.Contains("đang pha") ||
                     val.Contains("đang làm") || val.Contains("hoàn thành") || val.Contains("đã xong") ||
-                    val.Contains("pha chế"))
+                    val.Contains("pha chế") || val.Contains("đã phục vụ"))
                 {
                     return true;
                 }
@@ -337,8 +340,7 @@ namespace QuanLyCafe_Nhom8.GUI
             bool isSentToKitchen = IsItemSentToKitchen(dgvBillDetails.CurrentRow);
             string managerName = "";
 
-            // Chỉ món ĐÃ GỬI PHA CHẾ mới bắt buộc nhập tài khoản Quản lý/Admin để duyệt hủy.
-            // Món chưa gửi (nháp) -> xóa thẳng: không cần Admin, không hỏi xác nhận.
+            // Chỉ món ĐÃ GỬI PHA CHẾ mới bắt buộc nhập tài khoản Quản lý/Admin để duyệt hủy
             if (isSentToKitchen)
             {
                 if (!RequestManagerApprovalDialog($"Hủy món ĐÃ GỬI PHA CHẾ [{itemName}] tại {_selectedTableName}", out managerName))
@@ -352,8 +354,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 _posDal.RemoveBillDetailItem(billDetailId, _selectedTableId);
                 RefreshAll();
 
-                // Chỉ món đã gửi pha chế mới báo Telegram + hiện thông báo.
-                // Món nháp: xóa xong chỉ làm mới bảng hóa đơn, không hiện thông báo nào.
                 if (isSentToKitchen)
                 {
                     try
@@ -365,7 +365,7 @@ namespace QuanLyCafe_Nhom8.GUI
                             $"- Duyệt bởi: {managerName}\n" +
                             $"- Thời gian: {DateTime.Now:HH:mm dd/MM/yyyy}");
                     }
-                    catch { /* Bỏ qua lỗi mạng nếu không gửi được Telegram */ }
+                    catch { }
 
                     Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).", "Đã hủy món");
                 }
@@ -375,6 +375,7 @@ namespace QuanLyCafe_Nhom8.GUI
                 ShowError("Lỗi khi hủy món: " + ex.Message);
             }
         }
+
         private void btnApplyDiscount_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Bàn chưa có hóa đơn để áp dụng giảm giá!")) return;
@@ -441,7 +442,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 int sourceTableId = _selectedTableId;
                 _posDal.MergeOccupiedTables(sourceTableId, targetTable.TableId);
 
-                // Xóa giảm giá khi gộp bàn để tránh áp dụng sai mức giảm của đơn nhỏ sang đơn lớn
                 _tableDiscounts.Remove(sourceTableId);
                 _tableDiscounts.Remove(targetTable.TableId);
                 _approvedDiscountPercent = 0;
