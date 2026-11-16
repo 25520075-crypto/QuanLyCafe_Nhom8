@@ -1,3 +1,5 @@
 <Solution>
+  <Project Path="CafeServer/CafeServer.csproj" Id="e920d17f-9493-42dd-a286-67f8bee765b5" />
+  <Project Path="Protocol/Protocol.csproj" Id="64611ee6-e755-437f-975e-53c462f0ff65" />
   <Project Path="QuanLyCafe_Nhom8/QuanLyCafe_Nhom8.csproj" Id="80b71a2f-d14a-47a0-bab2-6505c6f98f5e" />
 </Solution>
