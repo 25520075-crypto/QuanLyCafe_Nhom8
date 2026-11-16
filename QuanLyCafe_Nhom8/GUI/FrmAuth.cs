@@ -275,7 +275,6 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 _cupPressDepth = 0;
                 pnlLeft3DStage.Invalidate();
-                PerformLogin();
             }
         }
 
@@ -460,7 +459,7 @@ namespace QuanLyCafe_Nhom8.GUI
             }
 
             // 8. Nhãn 3D phát sáng ngay trên thân ly
-            string cupLabel = _isCupHovered ? "⚡ CHẠM ĐỂ VÀO CA!" : "☕ CHẠM ĐỂ LOGIN";
+            string cupLabel = "☕ COFFEE FEFA";
             using (Font cupFont = new Font("Segoe UI", 9.5f, FontStyle.Bold))
             {
                 SizeF sz = g.MeasureString(cupLabel, cupFont);
@@ -585,29 +584,12 @@ namespace QuanLyCafe_Nhom8.GUI
                 }
             }
 
-            string sub = "Tương tác chuột 3D • Chạm Ly Cafe để vào Ca trực";
+            string sub = "Hệ thống Quản lý Quán Cafe Thông Minh - Nhóm 8";
             using (Font fSub = new Font("Segoe UI", 9.5f, FontStyle.Italic))
             using (SolidBrush subBrush = new SolidBrush(Color.FromArgb(215, 195, 185)))
             {
                 SizeF sz = g.MeasureString(sub, fSub);
                 g.DrawString(sub, fSub, subBrush, (w - sz.Width) / 2f, 78);
-            }
-
-            // Thẻ gợi ý tài khoản 3D Glass ở đáy cột trái
-            Rectangle hintBox = new Rectangle(28, h - 82, w - 56, 54);
-            using (GraphicsPath hp = GetRoundedPath(hintBox, 14))
-            using (SolidBrush glass = new SolidBrush(Color.FromArgb(95, 0, 0, 0)))
-            using (Pen border = new Pen(Color.FromArgb(80, 255, 204, 128), 1f))
-            {
-                g.FillPath(glass, hp);
-                g.DrawPath(border, hp);
-            }
-
-            using (Font fHint = new Font("Segoe UI", 9f, FontStyle.Bold))
-            using (SolidBrush hintBrush = new SolidBrush(Color.FromArgb(255, 224, 178)))
-            {
-                g.DrawString("🔑 TK Quản lý (Admin): admin / admin123", fHint, hintBrush, 46, h - 74);
-                g.DrawString("👤 TK Thu ngân (Staff): thungan1 / staff123", fHint, hintBrush, 46, h - 52);
             }
         }
 
@@ -1549,7 +1531,7 @@ namespace QuanLyCafe_Nhom8.GUI
             // 
             // FrmAuth
             // 
-            this.ClientSize = new System.Drawing.Size(759, 412);
+            this.ClientSize = new System.Drawing.Size(282, 253);
             this.Name = "FrmAuth";
             this.Load += new System.EventHandler(this.FrmAuth_Load);
             this.ResumeLayout(false);
@@ -1558,7 +1540,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
         private void FrmAuth_Load(object sender, EventArgs e)
         {
-
+                
         }
     }
 }

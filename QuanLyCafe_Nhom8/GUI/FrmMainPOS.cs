@@ -1,5 +1,6 @@
 ﻿using QuanLyCafe_Nhom8.DAL;
 using QuanLyCafe_Nhom8.DTO;
+using QuanLyCafe_Nhom8.GUI;
 using QuanLyCafe_Nhom8.Services;
 using System;
 using System.Collections.Generic;
@@ -37,6 +38,9 @@ namespace QuanLyCafe_Nhom8.GUI
             BuildModernPosInterface();
             LoadAllProducts();
             SwitchChannelTab(Channel.DineIn, reloadFromDb: true);
+
+            // Tự động bật luồng lắng nghe lệnh Telegram 2 chiều (/homnay, /homqua, /ban, /huymon)
+            new TelegramBotService().StartTwoWayListener();
         }
 
         // ==================== HÀM KIỂM TRA & LÀM MỚI DỮ LIỆU ====================
@@ -75,6 +79,40 @@ namespace QuanLyCafe_Nhom8.GUI
             if (Starts("Shopee") || Starts("XanhSM")) return Channel.ShopeeXanh;
             if (Starts("Grab")) return Channel.Grab;
             return Channel.DineIn;
+        }
+
+        // Kiểm tra món trên dòng hiện tại đã gửi xuống quầy pha chế hay chưa
+        private bool IsItemSentToKitchen(DataGridViewRow row)
+        {
+            if (row == null) return false;
+
+            foreach (DataGridViewCell cell in row.Cells)
+            {
+                if (cell.Value == null) continue;
+
+                if (cell.Value is bool isSentBool)
+                {
+                    return isSentBool;
+                }
+
+                string val = cell.Value.ToString().Trim().ToLowerInvariant();
+
+                // Nếu trạng thái đang là nháp / chưa gửi -> chưa gửi pha chế
+                if (val.Contains("nháp") || val.Contains("chưa gửi") || val.Contains("mới gọi") || val.Contains("chờ xác nhận"))
+                {
+                    return false;
+                }
+
+                // Nếu trạng thái đã chuyển xuống bếp / pha chế / hoàn thành -> đã gửi pha chế
+                if (val.Contains("đã gửi") || val.Contains("chờ pha") || val.Contains("đang pha") ||
+                    val.Contains("đang làm") || val.Contains("hoàn thành") || val.Contains("đã xong") ||
+                    val.Contains("pha chế") || val.Contains("đã phục vụ"))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // ==================== XỬ LÝ SƠ ĐỒ BÀN & THỰC ĐƠN ====================
@@ -299,17 +337,38 @@ namespace QuanLyCafe_Nhom8.GUI
 
             int billDetailId = Convert.ToInt32(dgvBillDetails.CurrentRow.Cells["BillDetailId"].Value);
             string itemName = dgvBillDetails.CurrentRow.Cells["Tên món"].Value.ToString();
+            bool isSentToKitchen = IsItemSentToKitchen(dgvBillDetails.CurrentRow);
+            string managerName = "";
 
-            if (!RequestManagerApprovalDialog($"Hủy món [{itemName}] tại {_selectedTableName}", out string managerName))
+            // Chỉ món ĐÃ GỬI PHA CHẾ mới bắt buộc nhập tài khoản Quản lý/Admin để duyệt hủy
+            if (isSentToKitchen)
             {
-                return;
+                if (!RequestManagerApprovalDialog($"Hủy món ĐÃ GỬI PHA CHẾ [{itemName}] tại {_selectedTableName}", out managerName))
+                {
+                    return;
+                }
             }
 
             try
             {
                 _posDal.RemoveBillDetailItem(billDetailId, _selectedTableId);
                 RefreshAll();
-                Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).", "Đã hủy món");
+
+                if (isSentToKitchen)
+                {
+                    try
+                    {
+                        new TelegramBotService().GuiTin(
+                            $"⚠️ CẢNH BÁO HỦY MÓN ĐÃ PHA CHẾ:\n" +
+                            $"- Bàn/Đơn: {_selectedTableName}\n" +
+                            $"- Món hủy: {itemName}\n" +
+                            $"- Duyệt bởi: {managerName}\n" +
+                            $"- Thời gian: {DateTime.Now:HH:mm dd/MM/yyyy}");
+                    }
+                    catch { }
+
+                    Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).", "Đã hủy món");
+                }
             }
             catch (Exception ex)
             {
@@ -383,7 +442,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 int sourceTableId = _selectedTableId;
                 _posDal.MergeOccupiedTables(sourceTableId, targetTable.TableId);
 
-                // Xóa giảm giá khi gộp bàn để tránh áp dụng sai mức giảm của đơn nhỏ sang đơn lớn
                 _tableDiscounts.Remove(sourceTableId);
                 _tableDiscounts.Remove(targetTable.TableId);
                 _approvedDiscountPercent = 0;

@@ -159,23 +159,5 @@ namespace QuanLyCafe_Nhom8.GUI
         {
             MessageBox.Show(bot.BaoHuyMon());
         }
-
-        private void InitializeComponent()
-        {
-            this.SuspendLayout();
-            // 
-            // FrmStatistics
-            // 
-            this.ClientSize = new System.Drawing.Size(282, 253);
-            this.Name = "FrmStatistics";
-            this.Load += new System.EventHandler(this.FrmStatistics_Load);
-            this.ResumeLayout(false);
-
-        }
-
-        private void FrmStatistics_Load(object sender, EventArgs e)
-        {
-
-        }
     }
 }
