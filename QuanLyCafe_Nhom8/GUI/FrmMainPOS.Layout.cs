@@ -128,13 +128,15 @@ namespace QuanLyCafe_Nhom8.GUI
                 AutoSize = true
             };
 
+            Button btnOpenChat = MakeButton("💬 Chat & Bot App", new Point(470, 11), new Size(150, 38), Theme.Blue, (s, e) =>
+            {
+                NetworkClient.Instance.ShowInAppChatAndStatsDialog(this, this.Text.Contains("Admin") ? "Quản lý" : "Thu ngân");
+            });
+
             Button btnOpenKDS = MakeButton("🔔 Màn hình Pha chế", new Point(630, 11), new Size(205, 38), Theme.Orange, (s, e) =>
             {
-                using (FrmKDS kdsForm = new FrmKDS())
-                {
-                    kdsForm.ShowDialog(this);
-                }
-                LoadBillForSelectedTable();
+                FrmKDS kdsForm = new FrmKDS();
+                kdsForm.Show();
             });
 
             Button btnOpenMenu = MakeButton("📋 Quản lý Thực đơn", new Point(855, 11), new Size(205, 38), Theme.Green, (s, e) =>
@@ -146,13 +148,14 @@ namespace QuanLyCafe_Nhom8.GUI
                 LoadAllProducts();
             });
 
-            Button btnOpenStats = MakeButton("📊 Thống kê & Telegram", new Point(1070, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
+            Button btnOpenStats = MakeButton("📊 Thống kê Doanh thu", new Point(1070, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
             {
                 using (FrmStatistics frm = new FrmStatistics())
                 {
                     frm.ShowDialog(this);
                 }
             });
+            pnlTopHeader.Controls.AddRange(new Control[] { lblBrand, btnOpenChat, btnOpenKDS, btnOpenMenu, btnOpenStats });
             pnlTopHeader.Controls.AddRange(new Control[] { lblBrand, btnOpenKDS, btnOpenMenu, btnOpenStats });
 
             // 2. CỘT TRÁI: KÊNH BÁN HÀNG & SƠ ĐỒ BÀN
@@ -419,7 +422,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
                 try
                 {
-                    if (_posDal.VerifyManagerAccount(txtUser.Text.Trim(), txtPass.Text, out approvedBy))
+                    if (_netClient.VerifyManagerAccount(txtUser.Text.Trim(), txtPass.Text, out approvedBy))
                     {
                         return true;
                     }

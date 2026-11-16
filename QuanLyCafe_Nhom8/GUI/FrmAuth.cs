@@ -619,7 +619,7 @@ namespace QuanLyCafe_Nhom8.GUI
             chkShow.CheckedChanged += (s, e) => txtLoginPass.UseSystemPasswordChar = !chkShow.Checked;
 
             Control btnLogin3D = Create3DExtrudedButton(
-                "🚀 ĐĂNG NHẬP VÀO HỆ THỐNG POS",
+                "🚀 ĐĂNG NHẬP ",
                 new Point(40, 315),
                 new Size(390, 52),
                 Color.FromArgb(230, 126, 34),
