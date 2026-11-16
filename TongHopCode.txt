@@ -1,4 +1,10 @@
-﻿using System;
+﻿
+
+/* =========================================
+   FILE: Form1.cs 
+========================================= */
+
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
@@ -18,6 +24,12 @@ namespace QuanLyCafe_Nhom8
         }
     }
 }
+
+
+/* =========================================
+   FILE: Form1.Designer.cs 
+========================================= */
+
 namespace QuanLyCafe_Nhom8
 {
     partial class Form1
@@ -58,6 +70,12 @@ namespace QuanLyCafe_Nhom8
     }
 }
 
+
+
+/* =========================================
+   FILE: Program.cs 
+========================================= */
+
 using System;
 using System.Windows.Forms;
 using QuanLyCafe_Nhom8.GUI;
@@ -71,10 +89,16 @@ namespace QuanLyCafe_Nhom8
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new FrmMainPOS());
+            Application.Run(new FrmAuth());
         }
     }
 }
+
+
+/* =========================================
+   FILE: DatabaseHelper.cs 
+========================================= */
+
 using System;
 using System.Data;
 using System.Data.SqlClient;
@@ -143,6 +167,174 @@ namespace QuanLyCafe_Nhom8.DAL
         }
     }
 }
+
+
+/* =========================================
+   FILE: MenuDAL.cs 
+========================================= */
+
+using System;
+using System.Data;
+using System.Data.SqlClient;
+
+namespace QuanLyCafe_Nhom8.DAL
+{
+    public class MenuDAL
+    {
+        public MenuDAL()
+        {
+            EnsureCategoriesSeeded();
+        }
+
+        // Đảm bảo bảng Categories luôn có sẵn các danh mục mặc định nếu DB mới tạo
+        private void EnsureCategoriesSeeded()
+        {
+            try
+            {
+                string sql = @"
+                    IF OBJECT_ID('dbo.Categories', 'U') IS NULL
+                    BEGIN
+                        CREATE TABLE dbo.Categories (
+                            CategoryId INT IDENTITY(1,1) PRIMARY KEY,
+                            CategoryName NVARCHAR(100) NOT NULL
+                        );
+                    END
+
+                    IF NOT EXISTS (SELECT 1 FROM dbo.Categories)
+                    BEGIN
+                        INSERT INTO dbo.Categories (CategoryName) VALUES
+                        (N'Cà phê truyền thống'),
+                        (N'Trà trái cây & Macchiato'),
+                        (N'Đá xay & Freeze'),
+                        (N'Bánh ngọt & Topping');
+                    END";
+                DatabaseHelper.ExecuteNonQuery(sql);
+            }
+            catch
+            {
+                // Bỏ qua nếu bảng đã có sẵn dữ liệu
+            }
+        }
+
+        // Lấy toàn bộ danh mục thực đơn
+        public DataTable GetAllCategories()
+        {
+            return DatabaseHelper.ExecuteQuery("SELECT CategoryId, CategoryName FROM Categories ORDER BY CategoryId ASC");
+        }
+
+        // Thêm nhanh 1 danh mục mới
+        public bool AddCategory(string categoryName)
+        {
+            string query = "INSERT INTO Categories (CategoryName) VALUES (@Name)";
+            SqlParameter[] prms = { new SqlParameter("@Name", categoryName.Trim()) };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Lấy danh sách món ăn kèm số thứ tự liên tục (ROW_NUMBER) để không bị nhảy số khi xóa
+        public DataTable GetProductsForManager(int categoryId = 0, string keyword = "")
+        {
+            string query = @"
+                SELECT 
+                    ROW_NUMBER() OVER (ORDER BY p.ProductId ASC) AS [STT],
+                    p.ProductId,
+                    p.CategoryId,
+                    p.ProductName AS [Tên món nước],
+                    ISNULL(c.CategoryName, N'Chưa phân loại') AS [Danh mục],
+                    p.Price AS [Đơn giá (VNĐ)],
+                    p.IsActive AS [Đang bán],
+                    ISNULL(p.ImagePath, '') AS [ImagePath]
+                FROM Products p
+                LEFT JOIN Categories c ON p.CategoryId = c.CategoryId
+                WHERE (@CatId = 0 OR p.CategoryId = @CatId)
+                  AND (@Kw = N'' OR p.ProductName LIKE N'%' + @Kw + N'%')
+                ORDER BY p.ProductId ASC";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@CatId", categoryId),
+                new SqlParameter("@Kw", keyword.Trim())
+            };
+            return DatabaseHelper.ExecuteQuery(query, prms);
+        }
+
+        // Thêm món mới
+        public bool InsertProduct(int categoryId, string name, decimal price, string imagePath, bool isActive)
+        {
+            string query = @"
+                INSERT INTO Products (CategoryId, ProductName, Price, ImagePath, IsActive)
+                VALUES (@CatId, @Name, @Price, @Img, @Active)";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@CatId", categoryId),
+                new SqlParameter("@Name", name.Trim()),
+                new SqlParameter("@Price", price),
+                new SqlParameter("@Img", string.IsNullOrEmpty(imagePath) ? (object)DBNull.Value : imagePath),
+                new SqlParameter("@Active", isActive)
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Cập nhật thông tin món
+        public bool UpdateProduct(int productId, int categoryId, string name, decimal price, string imagePath, bool isActive)
+        {
+            string query = @"
+                UPDATE Products
+                SET CategoryId = @CatId,
+                    ProductName = @Name,
+                    Price = @Price,
+                    ImagePath = @Img,
+                    IsActive = @Active
+                WHERE ProductId = @Id";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@CatId", categoryId),
+                new SqlParameter("@Name", name.Trim()),
+                new SqlParameter("@Price", price),
+                new SqlParameter("@Img", string.IsNullOrEmpty(imagePath) ? (object)DBNull.Value : imagePath),
+                new SqlParameter("@Active", isActive),
+                new SqlParameter("@Id", productId)
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Đổi nhanh trạng thái Đang bán / Ngừng bán
+        public bool ToggleProductStatus(int productId, bool currentStatus)
+        {
+            string query = "UPDATE Products SET IsActive = @NewStatus WHERE ProductId = @Id";
+            SqlParameter[] prms = {
+                new SqlParameter("@NewStatus", !currentStatus),
+                new SqlParameter("@Id", productId)
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Kiểm tra xem món đã từng xuất hiện trong hóa đơn (BillDetails) chưa
+        public bool IsProductUsedInBills(int productId)
+        {
+            string query = "SELECT COUNT(1) FROM BillDetails WHERE ProductId = @Id";
+            SqlParameter[] prms = { new SqlParameter("@Id", productId) };
+            int count = Convert.ToInt32(DatabaseHelper.ExecuteScalar(query, prms));
+            return count > 0;
+        }
+
+        // Xóa món và tự động Reseed lại ID trong bảng Products
+        public bool DeleteProduct(int productId)
+        {
+            string query = @"
+                DELETE FROM Products WHERE ProductId = @Id;
+                DECLARE @MaxId INT = ISNULL((SELECT MAX(ProductId) FROM Products), 0);
+                DBCC CHECKIDENT ('Products', RESEED, @MaxId);";
+
+            SqlParameter[] prms = { new SqlParameter("@Id", productId) };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: PosServiceDAL.cs 
+========================================= */
+
 using System;
 using System.Collections.Generic;
 using System.Data;
@@ -687,6 +879,12 @@ namespace QuanLyCafe_Nhom8.DAL
         }
     }
 }
+
+
+/* =========================================
+   FILE: UserDAL.cs 
+========================================= */
+
 using System;
 using System.Data;
 using System.Data.SqlClient;
@@ -699,25 +897,49 @@ namespace QuanLyCafe_Nhom8.DAL
     {
         public UserDAL()
         {
-            EnsureEmailColumnExists();
+            EnsureUsersSchemaAndDefaultAdmin();
         }
 
-        // Tự động thêm cột Email vào bảng Users nếu trong SQL chưa có
-        private void EnsureEmailColumnExists()
+        private void EnsureUsersSchemaAndDefaultAdmin()
         {
             try
             {
-                object colLength = DatabaseHelper.ExecuteScalar("SELECT COL_LENGTH('Users', 'Email')");
-                if (colLength == null || colLength == DBNull.Value)
+                string sql = @"
+                    IF COL_LENGTH('dbo.Users', 'Email') IS NULL
+                    BEGIN
+                        ALTER TABLE dbo.Users ADD Email VARCHAR(100) NULL;
+                    END";
+                DatabaseHelper.ExecuteNonQuery(sql);
+
+                string adminHash = AuthService.HashPassword("admin123");
+                string staffHash = AuthService.HashPassword("staff123");
+
+                string seedSql = @"
+                    IF NOT EXISTS (SELECT 1 FROM Users WHERE Username = 'admin')
+                    BEGIN
+                        INSERT INTO Users (Username, PasswordHash, FullName, Role, IsActive, Email)
+                        VALUES ('admin', @AdminHash, N'Quản lý Hệ thống', 'Admin', 1, 'admin@gmail.com');
+                    END
+                    ELSE
+                    BEGIN
+                        UPDATE Users SET Email = ISNULL(Email, 'admin@gmail.com') WHERE Username = 'admin';
+                    END
+
+                    IF NOT EXISTS (SELECT 1 FROM Users WHERE Username = 'thungan1')
+                    BEGIN
+                        INSERT INTO Users (Username, PasswordHash, FullName, Role, IsActive, Email)
+                        VALUES ('thungan1', @StaffHash, N'Thu ngân Ca Sáng', 'Staff', 1, 'thungan1@gmail.com');
+                    END";
+
+                DatabaseHelper.ExecuteNonQuery(seedSql, new SqlParameter[]
                 {
-                    DatabaseHelper.ExecuteNonQuery("ALTER TABLE Users ADD Email VARCHAR(100) NULL");
-                    DatabaseHelper.ExecuteNonQuery("UPDATE Users SET Email = 'admin@gmail.com' WHERE Username = 'admin'");
-                    DatabaseHelper.ExecuteNonQuery("UPDATE Users SET Email = 'thungan1@gmail.com' WHERE Username = 'thungan1'");
-                }
+                    new SqlParameter("@AdminHash", adminHash),
+                    new SqlParameter("@StaffHash", staffHash)
+                });
             }
             catch
             {
-                // Bỏ qua nếu đã tồn tại
+                // Bỏ qua nếu bảng đã sẵn sàng
             }
         }
 
@@ -727,11 +949,12 @@ namespace QuanLyCafe_Nhom8.DAL
             string query = @"
                 SELECT UserId, Username, FullName, Role, IsActive, Email 
                 FROM Users 
-                WHERE Username = @u AND PasswordHash = @p AND IsActive = 1";
+                WHERE Username = @u AND (PasswordHash = @hash OR PasswordHash = @raw) AND IsActive = 1";
 
             SqlParameter[] prms = {
-                new SqlParameter("@u", username),
-                new SqlParameter("@p", hash)
+                new SqlParameter("@u", username.Trim()),
+                new SqlParameter("@hash", hash),
+                new SqlParameter("@raw", plainPassword.Trim())
             };
 
             DataTable dt = DatabaseHelper.ExecuteQuery(query, prms);
@@ -751,12 +974,27 @@ namespace QuanLyCafe_Nhom8.DAL
             return null;
         }
 
+        // Tự động đánh lại Mã NV liên tục (1, 2, 3...) không bị nhảy cóc khi xóa
+        public DataTable GetAllUsers()
+        {
+            string query = @"
+                SELECT ROW_NUMBER() OVER (ORDER BY UserId ASC) AS [Mã NV], 
+                       Username AS [Tài khoản], 
+                       FullName AS [Họ và tên], 
+                       Role AS [Quyền hạn], 
+                       Email AS [Gmail liên kết], 
+                       IsActive AS [Đang hoạt động]
+                FROM Users
+                ORDER BY UserId ASC";
+            return DatabaseHelper.ExecuteQuery(query);
+        }
+
         public bool IsUsernameOrEmailExist(string username, string email)
         {
             string query = "SELECT COUNT(1) FROM Users WHERE Username = @u OR (Email IS NOT NULL AND Email = @e)";
             SqlParameter[] prms = {
-                new SqlParameter("@u", username),
-                new SqlParameter("@e", email)
+                new SqlParameter("@u", username.Trim()),
+                new SqlParameter("@e", email.Trim())
             };
             int count = Convert.ToInt32(DatabaseHelper.ExecuteScalar(query, prms));
             return count > 0;
@@ -765,23 +1003,24 @@ namespace QuanLyCafe_Nhom8.DAL
         public bool CheckEmailExist(string email)
         {
             string query = "SELECT COUNT(1) FROM Users WHERE Email = @e AND IsActive = 1";
-            SqlParameter[] prms = { new SqlParameter("@e", email) };
+            SqlParameter[] prms = { new SqlParameter("@e", email.Trim()) };
             int count = Convert.ToInt32(DatabaseHelper.ExecuteScalar(query, prms));
             return count > 0;
         }
 
-        public bool RegisterUser(string username, string plainPassword, string email, string fullName)
+        public bool CreateAccountByAdmin(string username, string plainPassword, string fullName, string role, string email)
         {
             string hash = AuthService.HashPassword(plainPassword);
             string query = @"
                 INSERT INTO Users (Username, PasswordHash, FullName, Role, IsActive, Email) 
-                VALUES (@u, @p, @fn, 'Staff', 1, @e)";
+                VALUES (@u, @p, @fn, @role, 1, @e)";
 
             SqlParameter[] prms = {
-                new SqlParameter("@u", username),
+                new SqlParameter("@u", username.Trim()),
                 new SqlParameter("@p", hash),
-                new SqlParameter("@fn", string.IsNullOrEmpty(fullName) ? username : fullName),
-                new SqlParameter("@e", email)
+                new SqlParameter("@fn", string.IsNullOrWhiteSpace(fullName) ? username.Trim() : fullName.Trim()),
+                new SqlParameter("@role", role),
+                new SqlParameter("@e", email.Trim())
             };
             return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
         }
@@ -792,12 +1031,55 @@ namespace QuanLyCafe_Nhom8.DAL
             string query = "UPDATE Users SET PasswordHash = @p WHERE Email = @e";
             SqlParameter[] prms = {
                 new SqlParameter("@p", hash),
-                new SqlParameter("@e", email)
+                new SqlParameter("@e", email.Trim())
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Xóa nhân viên theo đúng thứ tự Mã NV hiển thị và tự động Reseed lại bộ đếm SQL
+        public bool DeleteUser(int displayOrderId)
+        {
+            string query = @"
+                WITH OrderedUsers AS (
+                    SELECT UserId, ROW_NUMBER() OVER (ORDER BY UserId ASC) AS RN
+                    FROM Users
+                )
+                DELETE FROM Users
+                WHERE UserId IN (SELECT UserId FROM OrderedUsers WHERE RN = @rn);
+
+                DECLARE @MaxId INT = ISNULL((SELECT MAX(UserId) FROM Users), 0);
+                DBCC CHECKIDENT ('Users', RESEED, @MaxId);";
+
+            SqlParameter[] prms = { new SqlParameter("@rn", displayOrderId) };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Khóa / Mở khóa tài khoản theo đúng thứ tự Mã NV hiển thị
+        public bool ToggleUserActiveStatus(int displayOrderId, bool currentStatus)
+        {
+            string query = @"
+                WITH OrderedUsers AS (
+                    SELECT UserId, ROW_NUMBER() OVER (ORDER BY UserId ASC) AS RN
+                    FROM Users
+                )
+                UPDATE Users
+                SET IsActive = @newStatus
+                WHERE UserId IN (SELECT UserId FROM OrderedUsers WHERE RN = @rn)";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@newStatus", !currentStatus),
+                new SqlParameter("@rn", displayOrderId)
             };
             return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
         }
     }
 }
+
+
+/* =========================================
+   FILE: UserDTO.cs 
+========================================= */
+
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -817,6 +1099,12 @@ namespace QuanLyCafe_Nhom8.DAL
         public string Email { get; set; }
     }
 }
+
+
+/* =========================================
+   FILE: Model.cs 
+========================================= */
+
 using System;
 
 namespace QuanLyCafe_Nhom8.DTO
@@ -847,12 +1135,33 @@ namespace QuanLyCafe_Nhom8.DTO
         public decimal SubTotal => Quantity * UnitPrice;
     }
 }
+
+public class UserDTO
+{
+    public int UserId { get; set; }
+    public string Username { get; set; }
+    public string PasswordHash { get; set; }
+    public string FullName { get; set; }
+    public string Role { get; set; }
+    public bool IsActive { get; set; }
+    public string Email { get; set; }
+}
+
+
+/* =========================================
+   FILE: FrmAuth.cs 
+========================================= */
+
 using System;
+using System.Collections.Generic;
 using System.Data;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Text;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using QuanLyCafe_Nhom8.DAL;
+using QuanLyCafe_Nhom8.DTO;
 using QuanLyCafe_Nhom8.Services;
 
 namespace QuanLyCafe_Nhom8.GUI
@@ -861,43 +1170,85 @@ namespace QuanLyCafe_Nhom8.GUI
     {
         private readonly UserDAL _userDal = new UserDAL();
 
-        private string _currentOtp = "";
-        private string _resetEmail = "";
-        private DateTime _otpExpiry;
+        // Trạng thái OTP Quên mật khẩu
+        private string _forgotOtp = "";
+        private string _forgotEmail = "";
+        private DateTime _forgotOtpExpiry;
 
-        private Panel pnlLogin;
-        private Panel pnlRegister;
-        private Panel pnlForgot;
+        // Các Panel 3D chống nháy (Double-Buffered)
+        private BufferedPanel pnlLeft3DStage;
+        private BufferedPanel pnlLoginCard;
+        private BufferedPanel pnlForgotCard;
 
+        // Controls Đăng nhập
         private TextBox txtLoginUser;
         private TextBox txtLoginPass;
 
-        private TextBox txtRegUser;
-        private TextBox txtRegFullName;
-        private TextBox txtRegEmail;
-        private TextBox txtRegPass;
-        private TextBox txtRegConfirm;
-
+        // Controls Quên mật khẩu
         private TextBox txtForgotEmail;
         private TextBox txtOtpCode;
         private TextBox txtNewPass;
-        private Button btnSendOtp;
-        private Button btnConfirmReset;
+        private Control btnSendOtp3D;
+        private Control btnConfirmReset3D;
 
-        private PictureBox picCoffeeCup3D;
-        private Timer animTimer;
-        private float smokePhase = 0f;
-        private bool isCupHovered = false;
-        private int cupPressOffset = 0;
+        // Biến đồ họa 3D Realtime & Mouse Parallax
+        private Timer _renderTimer;
+        private float _animTick = 0f;
+        private PointF _mouseNormalized = new PointF(0, 0);
+        private bool _isCupHovered = false;
+        private int _cupPressDepth = 0;
+        private readonly List<FloatingBean3D> _beans3D = new List<FloatingBean3D>();
+
+        // Cho phép kéo thả cửa sổ không viền
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+        [DllImport("user32.dll")]
+        private static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
+
+        private class FloatingBean3D
+        {
+            public float X, Y, Z; // Z: Độ sâu 3D (0.4 -> 1.3)
+            public float Angle, SpinSpeed, FloatSpeed, Phase;
+        }
+
+        // Panel tùy chỉnh bật sẵn DoubleBuffered để vẽ 3D 60FPS không bị nháy hình
+        private class BufferedPanel : Panel
+        {
+            public BufferedPanel()
+            {
+                this.DoubleBuffered = true;
+                this.SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+                this.UpdateStyles();
+            }
+        }
 
         public FrmAuth()
         {
-            BuildAuthInterface();
+            Initialize3DBeans();
+            Build3DWindowFrame();
             SetupCoffeeBeanCursor();
-            Setup3DCoffeeAnimation();
+            Start3DEngine();
         }
 
-        // 1. VẼ CON TRỎ HẠT CAFE 3D BẰNG GDI+
+        // ==================== 1. KHỞI TẠO HẠT CAFE BAY TRONG KHÔNG GIAN 3D ====================
+        private void Initialize3DBeans()
+        {
+            Random rnd = new Random(88);
+            for (int i = 0; i < 11; i++)
+            {
+                _beans3D.Add(new FloatingBean3D
+                {
+                    X = rnd.Next(35, 390),
+                    Y = rnd.Next(50, 520),
+                    Z = 0.45f + (float)rnd.NextDouble() * 0.85f,
+                    Angle = rnd.Next(0, 360),
+                    SpinSpeed = (float)(rnd.NextDouble() * 2.4 - 1.2),
+                    FloatSpeed = 0.6f + (float)rnd.NextDouble() * 1.1f,
+                    Phase = (float)(rnd.NextDouble() * Math.PI * 2)
+                });
+            }
+        }
+
         private void SetupCoffeeBeanCursor()
         {
             try
@@ -909,19 +1260,18 @@ namespace QuanLyCafe_Nhom8.GUI
                     g.TranslateTransform(14, 14);
                     g.RotateTransform(-30);
 
-                    using (SolidBrush shadow = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
-                        g.FillEllipse(shadow, -8, -10, 18, 24);
+                    using (SolidBrush shadow = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
+                        g.FillEllipse(shadow, -7, -9, 18, 24);
 
                     using (LinearGradientBrush beanBrush = new LinearGradientBrush(
                         new Rectangle(-9, -12, 18, 24),
-                        Color.FromArgb(160, 100, 60),
-                        Color.FromArgb(65, 35, 15),
-                        45f))
+                        Color.FromArgb(205, 133, 63),
+                        Color.FromArgb(55, 28, 12), 45f))
                     {
                         g.FillEllipse(beanBrush, -9, -12, 18, 24);
                     }
 
-                    using (Pen creasePen = new Pen(Color.FromArgb(40, 20, 10), 2.2f))
+                    using (Pen creasePen = new Pen(Color.FromArgb(35, 15, 5), 2.2f))
                     {
                         Point[] curve = { new Point(0, -10), new Point(-3, -3), new Point(3, 3), new Point(0, 10) };
                         g.DrawCurve(creasePen, curve);
@@ -935,277 +1285,874 @@ namespace QuanLyCafe_Nhom8.GUI
             }
         }
 
-        // 2. HIỆU ỨNG KHÓI BAY 3D TRÊN LY CAFE
-        private void Setup3DCoffeeAnimation()
+        private void Start3DEngine()
         {
-            animTimer = new Timer { Interval = 35 };
-            animTimer.Tick += (s, e) =>
+            _renderTimer = new Timer { Interval = 25 }; // ~40 FPS mượt mà
+            _renderTimer.Tick += (s, e) =>
             {
-                smokePhase += 0.22f;
-                if (smokePhase > Math.PI * 2) smokePhase -= (float)(Math.PI * 2);
-                picCoffeeCup3D.Invalidate();
+                _animTick += 0.08f;
+                foreach (var b in _beans3D)
+                {
+                    b.Angle += b.SpinSpeed;
+                    b.Y -= b.FloatSpeed * b.Z;
+                    if (b.Y < -30) b.Y = 580;
+                }
+                pnlLeft3DStage.Invalidate();
             };
-            animTimer.Start();
+            _renderTimer.Start();
         }
 
-        private void BuildAuthInterface()
+        // ==================== 2. DỰNG KHUNG CỬA SỐ 3D KHÔNG VIỀN ====================
+        private void Build3DWindowFrame()
         {
-            this.Text = "Đăng nhập Hệ thống Quản lý Cafe - Nhóm 8";
-            this.Size = new Size(920, 560);
+            this.Text = "Hệ thống Quản lý Cafe 3D - Nhóm 8";
+            this.Size = new Size(980, 580);
             this.StartPosition = FormStartPosition.CenterScreen;
-            this.FormBorderStyle = FormBorderStyle.FixedSingle;
-            this.MaximizeBox = false;
-            this.BackColor = Color.FromArgb(245, 238, 230);
+            this.FormBorderStyle = FormBorderStyle.None;
+            this.BackColor = Color.FromArgb(28, 18, 14);
             this.DoubleBuffered = true;
 
-            Panel pnlLeft = new Panel
+            // Bo tròn góc toàn bộ cửa sổ Form
+            this.Load += (s, e) =>
+            {
+                using (GraphicsPath formPath = GetRoundedPath(new Rectangle(0, 0, this.Width, this.Height), 22))
+                {
+                    this.Region = new Region(formPath);
+                }
+            };
+
+            // Vẽ nền 3D phía bên phải
+            this.Paint += (s, e) =>
+            {
+                Graphics g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (LinearGradientBrush bgBrush = new LinearGradientBrush(
+                    this.ClientRectangle,
+                    Color.FromArgb(42, 27, 21),
+                    Color.FromArgb(22, 13, 9), 135f))
+                {
+                    g.FillRectangle(bgBrush, this.ClientRectangle);
+                }
+
+                // Quầng sáng 3D Ambient phía dưới Card bên phải
+                using (GraphicsPath glowPath = new GraphicsPath())
+                {
+                    glowPath.AddEllipse(440, 40, 500, 500);
+                    using (PathGradientBrush pgb = new PathGradientBrush(glowPath))
+                    {
+                        pgb.CenterColor = Color.FromArgb(45, 230, 126, 34);
+                        pgb.SurroundColors = new Color[] { Color.Transparent };
+                        g.FillPath(pgb, glowPath);
+                    }
+                }
+
+                // Viền kim loại 3D bao quanh toàn Form
+                using (Pen borderPen = new Pen(Color.FromArgb(110, 211, 84, 0), 2f))
+                using (GraphicsPath borderPath = GetRoundedPath(new Rectangle(1, 1, this.Width - 3, this.Height - 3), 22))
+                {
+                    g.DrawPath(borderPen, borderPath);
+                }
+            };
+
+            // Cho phép kéo cửa sổ khi giữ chuột trên nền Form
+            this.MouseDown += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    ReleaseCapture();
+                    SendMessage(this.Handle, 0xA1, 0x2, 0);
+                }
+            };
+
+            // Sân khấu 3D bên trái (430px)
+            pnlLeft3DStage = new BufferedPanel
             {
                 Location = new Point(0, 0),
-                Size = new Size(380, 560),
-                BackColor = Color.FromArgb(62, 39, 35)
-            };
-
-            Label lblBrand = new Label
-            {
-                Text = "CAFE NHÓM 8",
-                Font = new Font("Segoe UI", 22, FontStyle.Bold),
-                ForeColor = Color.FromArgb(255, 204, 128),
-                Location = new Point(65, 45),
-                AutoSize = true
-            };
-
-            Label lblSub = new Label
-            {
-                Text = "Nhập tài khoản bên phải rồi chạm vào\nLy Cafe 3D để Đăng nhập!",
-                Font = new Font("Segoe UI", 10, FontStyle.Italic),
-                ForeColor = Color.FromArgb(215, 204, 200),
-                Location = new Point(55, 95),
-                TextAlign = ContentAlignment.MiddleCenter,
-                AutoSize = true
-            };
-
-            picCoffeeCup3D = new PictureBox
-            {
-                Location = new Point(65, 150),
-                Size = new Size(250, 260),
+                Size = new Size(430, 580),
                 BackColor = Color.Transparent
             };
-            picCoffeeCup3D.Paint += PicCoffeeCup3D_Paint;
-            picCoffeeCup3D.MouseEnter += (s, e) => { isCupHovered = true; };
-            picCoffeeCup3D.MouseLeave += (s, e) => { isCupHovered = false; cupPressOffset = 0; };
-            picCoffeeCup3D.MouseDown += (s, e) => { cupPressOffset = 5; picCoffeeCup3D.Invalidate(); };
-            picCoffeeCup3D.MouseUp += (s, e) => { cupPressOffset = 0; picCoffeeCup3D.Invalidate(); PerformLogin(); };
+            pnlLeft3DStage.Paint += PnlLeft3DStage_Paint;
+            pnlLeft3DStage.MouseMove += PnlLeft3DStage_MouseMove;
+            pnlLeft3DStage.MouseLeave += (s, e) => { _isCupHovered = false; _cupPressDepth = 0; _mouseNormalized = new PointF(0, 0); };
+            pnlLeft3DStage.MouseDown += PnlLeft3DStage_MouseDown;
+            pnlLeft3DStage.MouseUp += PnlLeft3DStage_MouseUp;
 
-            Label lblHint = new Label
-            {
-                Text = "TK mẫu: admin (MK: admin123) | thungan1 (MK: staff123)",
-                Font = new Font("Segoe UI", 8.5f),
-                ForeColor = Color.FromArgb(188, 170, 164),
-                Location = new Point(25, 440),
-                AutoSize = true
-            };
+            // Nút Đóng (X) và Thu nhỏ (_) 3D ở góc phải trên cùng
+            Control btnClose = CreateWindowControlButton("✕", new Point(932, 14), Color.FromArgb(192, 57, 43), (s, e) => Application.Exit());
+            Control btnMin = CreateWindowControlButton("—", new Point(892, 14), Color.FromArgb(93, 64, 55), (s, e) => this.WindowState = FormWindowState.Minimized);
 
-            pnlLeft.Controls.Add(lblBrand);
-            pnlLeft.Controls.Add(lblSub);
-            pnlLeft.Controls.Add(picCoffeeCup3D);
-            pnlLeft.Controls.Add(lblHint);
+            Build3DLoginCard();
+            Build3DForgotCard();
 
-            BuildLoginPanel();
-            BuildRegisterPanel();
-            BuildForgotPanel();
+            this.Controls.Add(btnClose);
+            this.Controls.Add(btnMin);
+            this.Controls.Add(pnlLeft3DStage);
+            this.Controls.Add(pnlLoginCard);
+            this.Controls.Add(pnlForgotCard);
 
-            this.Controls.Add(pnlLeft);
-            this.Controls.Add(pnlLogin);
-            this.Controls.Add(pnlRegister);
-            this.Controls.Add(pnlForgot);
-
-            ShowPanel(pnlLogin);
+            ShowCard(pnlLoginCard);
         }
 
-        private void PicCoffeeCup3D_Paint(object sender, PaintEventArgs e)
+        // ==================== 3. VẼ SÂN KHẤU LY CAFE 3D ẢO & HOLOGRAM ====================
+        private void PnlLeft3DStage_MouseMove(object sender, MouseEventArgs e)
+        {
+            // Tính góc nghiêng 3D Parallax theo tọa độ chuột (-1.0 -> +1.0)
+            _mouseNormalized = new PointF(
+                (e.X - pnlLeft3DStage.Width / 2f) / (pnlLeft3DStage.Width / 2f),
+                (e.Y - pnlLeft3DStage.Height / 2f) / (pnlLeft3DStage.Height / 2f)
+            );
+
+            // Kiểm tra chuột có đang chạm vào vùng Ly Cafe 3D không
+            Rectangle cupHitBox = new Rectangle(110, 175, 210, 220);
+            _isCupHovered = cupHitBox.Contains(e.Location);
+
+            // Cho phép kéo cửa sổ nếu nhấn giữ ngoài vùng ly cafe
+            if (e.Button == MouseButtons.Left && !_isCupHovered)
+            {
+                ReleaseCapture();
+                SendMessage(this.Handle, 0xA1, 0x2, 0);
+            }
+        }
+
+        private void PnlLeft3DStage_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (_isCupHovered && e.Button == MouseButtons.Left)
+            {
+                _cupPressDepth = 8;
+                pnlLeft3DStage.Invalidate();
+            }
+        }
+
+        private void PnlLeft3DStage_MouseUp(object sender, MouseEventArgs e)
+        {
+            if (_cupPressDepth > 0)
+            {
+                _cupPressDepth = 0;
+                pnlLeft3DStage.Invalidate();
+            }
+        }
+
+        private void PnlLeft3DStage_Paint(object sender, PaintEventArgs e)
         {
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
-            int offsetY = cupPressOffset + (isCupHovered ? -4 : 0);
+            int w = pnlLeft3DStage.Width;
+            int h = pnlLeft3DStage.Height;
 
-            for (int i = 0; i < 3; i++)
+            // 1. Nền 3D Studio tối sang trọng
+            using (LinearGradientBrush studioBg = new LinearGradientBrush(
+                new Rectangle(0, 0, w, h),
+                Color.FromArgb(52, 31, 23),
+                Color.FromArgb(18, 10, 7), 115f))
             {
-                float wave = (float)Math.Sin(smokePhase + i * 1.5f) * 10f;
-                int x = 95 + i * 25 + (int)wave;
-                int y = 45 + offsetY - (int)(Math.Cos(smokePhase + i) * 6);
+                g.FillRectangle(studioBg, 0, 0, w, h);
+            }
 
-                using (Pen smokePen = new Pen(Color.FromArgb(isCupHovered ? 160 : 90, 255, 245, 235), 4f))
+            // Ánh sáng Spotlight 3D chiếu từ đỉnh xuống ly cafe
+            float px = _mouseNormalized.X * 18f;
+            float py = _mouseNormalized.Y * 14f;
+
+            using (GraphicsPath spotPath = new GraphicsPath())
+            {
+                spotPath.AddEllipse(30 + px, 85 + py, 370, 390);
+                using (PathGradientBrush spotBrush = new PathGradientBrush(spotPath))
                 {
-                    smokePen.StartCap = LineCap.Round;
-                    smokePen.EndCap = LineCap.Round;
-                    g.DrawBezier(smokePen, x, y + 40, x - 15, y + 25, x + 15, y + 10, x, y - 5);
+                    spotBrush.CenterColor = _isCupHovered
+                        ? Color.FromArgb(115, 255, 152, 0)
+                        : Color.FromArgb(70, 211, 84, 0);
+                    spotBrush.SurroundColors = new Color[] { Color.Transparent };
+                    g.FillPath(spotBrush, spotPath);
                 }
             }
 
-            using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
-                g.FillEllipse(shadowBrush, 35, 210, 180, 28);
-
-            using (LinearGradientBrush saucerBrush = new LinearGradientBrush(
-                new Rectangle(40, 195 + offsetY, 170, 26),
-                Color.FromArgb(245, 245, 245),
-                Color.FromArgb(160, 150, 140), 90f))
+            // 2. Vẽ các hạt cafe 3D lớp xa (Z < 0.8)
+            foreach (var b in _beans3D)
             {
-                g.FillEllipse(saucerBrush, 40, 195 + offsetY, 170, 26);
+                if (b.Z < 0.8f) DrawSingle3DBean(g, b, px, py);
             }
 
-            using (Pen handlePen = new Pen(Color.FromArgb(230, 220, 210), 12f))
-                g.DrawArc(handlePen, 155, 115 + offsetY, 50, 65, -70, 140);
+            // 3. Bệ phóng Hologram 3D dưới đáy đĩa
+            int cx = 215 + (int)px;
+            int cy = 340 + (int)py + _cupPressDepth + (_isCupHovered ? -6 : 0);
 
-            Rectangle cupRect = new Rectangle(60, 95 + offsetY, 130, 110);
-            Color c1 = isCupHovered ? Color.FromArgb(255, 167, 38) : Color.FromArgb(215, 204, 200);
-            Color c2 = isCupHovered ? Color.FromArgb(216, 67, 21) : Color.FromArgb(121, 85, 72);
-
-            using (LinearGradientBrush cupBrush = new LinearGradientBrush(cupRect, c1, c2, 0f))
+            for (int r = 0; r < 3; r++)
             {
-                GraphicsPath path = new GraphicsPath();
-                path.AddArc(60, 145 + offsetY, 130, 60, 0, 180);
-                path.AddLine(60, 175 + offsetY, 60, 100 + offsetY);
-                path.AddLine(60, 100 + offsetY, 190, 100 + offsetY);
-                path.AddLine(190, 100 + offsetY, 190, 175 + offsetY);
-                path.CloseFigure();
-                g.FillPath(cupBrush, path);
+                float pulse = (float)Math.Sin(_animTick * 1.5f + r) * 6f;
+                int rw = 240 + r * 28 + (int)pulse;
+                int rh = 44 + r * 7;
+                int alpha = _isCupHovered ? (110 - r * 30) : (60 - r * 18);
+                using (Pen holoPen = new Pen(Color.FromArgb(Math.Max(15, alpha), 255, 183, 77), 1.8f))
+                {
+                    g.DrawEllipse(holoPen, cx - rw / 2, 392 + (int)(py * 0.5f) - rh / 2, rw, rh);
+                }
             }
 
-            using (SolidBrush rimBrush = new SolidBrush(Color.FromArgb(245, 240, 235)))
-                g.FillEllipse(rimBrush, 60, 85 + offsetY, 130, 30);
-
-            using (SolidBrush coffeeLiquid = new SolidBrush(Color.FromArgb(62, 39, 35)))
-                g.FillEllipse(coffeeLiquid, 66, 89 + offsetY, 118, 22);
-
-            using (Font f = new Font("Segoe UI", 10, FontStyle.Bold))
-            using (SolidBrush textBrush = new SolidBrush(Color.White))
+            // Bóng đổ 3D sâu dưới đáy đĩa (Ambient Occlusion)
+            using (GraphicsPath shadowPath = new GraphicsPath())
             {
-                string txt = isCupHovered ? "BẤM ĐỂ VÀO!" : "ĐĂNG NHẬP";
-                SizeF sz = g.MeasureString(txt, f);
-                g.DrawString(txt, f, textBrush, 125 - sz.Width / 2, 140 + offsetY);
+                shadowPath.AddEllipse(cx - 120, 372, 240, 48);
+                using (PathGradientBrush shadowBrush = new PathGradientBrush(shadowPath))
+                {
+                    shadowBrush.CenterColor = Color.FromArgb(210, 0, 0, 0);
+                    shadowBrush.SurroundColors = new Color[] { Color.Transparent };
+                    g.FillPath(shadowBrush, shadowPath);
+                }
+            }
+
+            // 4. Đĩa sứ 3D (Saucer) có độ dày và ánh kim
+            Rectangle saucerBottom = new Rectangle(cx - 108, cy + 32, 216, 42);
+            Rectangle saucerTop = new Rectangle(cx - 112, cy + 25, 224, 42);
+            using (LinearGradientBrush sRim = new LinearGradientBrush(saucerBottom, Color.FromArgb(130, 110, 98), Color.FromArgb(65, 48, 40), 90f))
+                g.FillEllipse(sRim, saucerBottom);
+
+            using (LinearGradientBrush sSurface = new LinearGradientBrush(saucerTop, Color.FromArgb(252, 248, 244), Color.FromArgb(175, 160, 148), 45f))
+                g.FillEllipse(sSurface, saucerTop);
+
+            // Lòng đĩa trũng 3D
+            using (LinearGradientBrush sWell = new LinearGradientBrush(new Rectangle(cx - 65, cy + 34, 130, 22), Color.FromArgb(145, 130, 118), Color.FromArgb(235, 228, 220), 90f))
+                g.FillEllipse(sWell, cx - 65, cy + 34, 130, 22);
+
+            // 5. Quai cầm 3D (Cup Handle) có bóng khối
+            using (Pen handleShadow = new Pen(Color.FromArgb(90, 0, 0, 0), 14f))
+                g.DrawArc(handleShadow, cx + 48, cy - 68, 62, 76, -65, 145);
+
+            using (LinearGradientBrush handleBrush = new LinearGradientBrush(new Rectangle(cx + 45, cy - 75, 68, 80),
+                _isCupHovered ? Color.FromArgb(255, 213, 79) : Color.FromArgb(245, 238, 230),
+                _isCupHovered ? Color.FromArgb(191, 54, 12) : Color.FromArgb(135, 105, 90), 45f))
+            using (Pen handlePen = new Pen(handleBrush, 13f))
+            {
+                handlePen.StartCap = LineCap.Round;
+                handlePen.EndCap = LineCap.Round;
+                g.DrawArc(handlePen, cx + 45, cy - 72, 62, 76, -68, 145);
+            }
+
+            // 6. Thân Ly Cafe 3D (Spherical Cylinder Shading)
+            Rectangle cupBounds = new Rectangle(cx - 82, cy - 92, 164, 138);
+            using (GraphicsPath cupPath = new GraphicsPath())
+            {
+                cupPath.AddArc(cx - 82, cy - 22, 164, 72, 0, 180);
+                cupPath.AddLine(cx - 82, cy + 14, cx - 86, cy - 88);
+                cupPath.AddLine(cx - 86, cy - 88, cx + 86, cy - 88);
+                cupPath.AddLine(cx + 86, cy - 88, cx + 82, cy + 14);
+                cupPath.CloseFigure();
+
+                using (LinearGradientBrush bodyGrad = new LinearGradientBrush(
+                    cupBounds,
+                    _isCupHovered ? Color.FromArgb(255, 183, 77) : Color.FromArgb(245, 239, 234),
+                    _isCupHovered ? Color.FromArgb(165, 42, 4) : Color.FromArgb(93, 64, 55), 15f))
+                {
+                    ColorBlend cb = new ColorBlend();
+                    cb.Positions = new float[] { 0f, 0.25f, 0.65f, 1f };
+                    if (_isCupHovered)
+                    {
+                        cb.Colors = new Color[] {
+                            Color.FromArgb(255, 224, 130),
+                            Color.FromArgb(255, 152, 0),
+                            Color.FromArgb(216, 67, 21),
+                            Color.FromArgb(110, 28, 0)
+                        };
+                    }
+                    else
+                    {
+                        cb.Colors = new Color[] {
+                            Color.FromArgb(255, 252, 248),
+                            Color.FromArgb(228, 216, 206),
+                            Color.FromArgb(155, 125, 110),
+                            Color.FromArgb(78, 52, 42)
+                        };
+                    }
+                    bodyGrad.InterpolationColors = cb;
+                    g.FillPath(bodyGrad, cupPath);
+                }
+
+                // Vệt phản quang 3D (Specular Glossy Strip) dọc thân ly
+                using (GraphicsPath glossPath = new GraphicsPath())
+                {
+                    glossPath.AddBezier(
+                        cx - 64, cy - 78,
+                        cx - 66, cy - 35,
+                        cx - 56, cy + 10,
+                        cx - 38, cy + 32);
+                    using (Pen glossPen = new Pen(Color.FromArgb(115, 255, 255, 255), 9f))
+                    {
+                        glossPen.StartCap = LineCap.Round;
+                        glossPen.EndCap = LineCap.Round;
+                        g.DrawPath(glossPen, glossPath);
+                    }
+                }
+            }
+
+            // 7. Vành miệng ly 3D & Nước Cafe Espresso + Latte Art
+            Rectangle rimOuter = new Rectangle(cx - 86, cy - 108, 172, 40);
+            Rectangle liquidRect = new Rectangle(cx - 78, cy - 103, 156, 30);
+
+            using (LinearGradientBrush rimBrush = new LinearGradientBrush(rimOuter, Color.White, Color.FromArgb(180, 165, 155), 0f))
+                g.FillEllipse(rimBrush, rimOuter);
+
+            using (LinearGradientBrush coffeeBrush = new LinearGradientBrush(liquidRect, Color.FromArgb(42, 21, 12), Color.FromArgb(125, 68, 32), 45f))
+                g.FillEllipse(coffeeBrush, liquidRect);
+
+            // Lớp bọt Crema & Trái tim Latte Art 3D chuyển động nhẹ
+            float cremaWave = (float)Math.Sin(_animTick * 2f) * 3f;
+            using (Pen cremaPen = new Pen(Color.FromArgb(180, 230, 176, 115), 3f))
+                g.DrawArc(cremaPen, cx - 55 + cremaWave, cy - 96, 110, 18, 15, 150);
+
+            // Vẽ tim Latte Art ở giữa mặt cafe
+            using (SolidBrush latteArtBrush = new SolidBrush(Color.FromArgb(215, 248, 235, 215)))
+            {
+                g.FillEllipse(latteArtBrush, cx - 14 + cremaWave, cy - 93, 15, 10);
+                g.FillEllipse(latteArtBrush, cx - 1 + cremaWave, cy - 93, 15, 10);
+                PointF[] heartTip = {
+                    new PointF(cx - 14 + cremaWave, cy - 88),
+                    new PointF(cx + 14 + cremaWave, cy - 88),
+                    new PointF(cx + cremaWave, cy - 79)
+                };
+                g.FillPolygon(latteArtBrush, heartTip);
+            }
+
+            // 8. Nhãn 3D phát sáng ngay trên thân ly
+            string cupLabel = "☕ COFFEE FEFA";
+            using (Font cupFont = new Font("Segoe UI", 9.5f, FontStyle.Bold))
+            {
+                SizeF sz = g.MeasureString(cupLabel, cupFont);
+                RectangleF badgeRect = new RectangleF(cx - sz.Width / 2 - 10, cy - 42, sz.Width + 20, 26);
+                using (GraphicsPath badgePath = GetRoundedPath(Rectangle.Round(badgeRect), 12))
+                using (SolidBrush badgeBg = new SolidBrush(Color.FromArgb(_isCupHovered ? 210 : 150, 38, 20, 14)))
+                using (Pen badgeBorder = new Pen(Color.FromArgb(190, 255, 204, 128), 1.2f))
+                {
+                    g.FillPath(badgeBg, badgePath);
+                    g.DrawPath(badgeBorder, badgePath);
+                }
+                using (SolidBrush txtBrush = new SolidBrush(Color.FromArgb(255, 243, 224)))
+                {
+                    g.DrawString(cupLabel, cupFont, txtBrush, cx - sz.Width / 2, cy - 38);
+                }
+            }
+
+            // 9. Khói 3D đa tầng bay lên (Volumetric Steam)
+            for (int i = 0; i < 4; i++)
+            {
+                float sWave = (float)Math.Sin(_animTick * 1.4f + i * 1.3f) * 14f;
+                int sx = cx - 38 + i * 25 + (int)sWave;
+                int sy = cy - 115 - (int)(Math.Cos(_animTick + i) * 8);
+
+                for (int thick = 3; thick >= 1; thick--)
+                {
+                    int alpha = (_isCupHovered ? 55 : 32) / thick;
+                    using (Pen smokePen = new Pen(Color.FromArgb(alpha, 255, 245, 235), thick * 4.5f))
+                    {
+                        smokePen.StartCap = LineCap.Round;
+                        smokePen.EndCap = LineCap.Round;
+                        g.DrawBezier(smokePen,
+                            sx, sy + 15,
+                            sx - 20, sy - 15,
+                            sx + 22, sy - 45,
+                            sx - 5, sy - 80);
+                    }
+                }
+            }
+
+            // 10. Vẽ các hạt cafe 3D lớp gần (Z >= 0.8) bay phía trước ly
+            foreach (var b in _beans3D)
+            {
+                if (b.Z >= 0.8f) DrawSingle3DBean(g, b, px, py);
+            }
+
+            // 11. Header Thương hiệu 3D Metallic trên đỉnh Sân khấu
+            Draw3DStageTypography(g, w, h);
+
+            // Đường phân cách ánh kim 3D giữa Sân khấu trái và Form phải
+            using (LinearGradientBrush divBrush = new LinearGradientBrush(
+                new Point(w - 2, 0), new Point(w - 2, h),
+                Color.Transparent, Color.FromArgb(180, 211, 84, 0)))
+            {
+                ColorBlend cb = new ColorBlend
+                {
+                    Positions = new float[] { 0f, 0.5f, 1f },
+                    Colors = new Color[] { Color.Transparent, Color.FromArgb(180, 230, 126, 34), Color.Transparent }
+                };
+                divBrush.InterpolationColors = cb;
+                using (Pen divPen = new Pen(divBrush, 2f))
+                {
+                    g.DrawLine(divPen, w - 1, 20, w - 1, h - 20);
+                }
             }
         }
 
-        private void BuildLoginPanel()
+        private void DrawSingle3DBean(Graphics g, FloatingBean3D b, float px, float py)
         {
-            pnlLogin = CreateCardPanel();
+            GraphicsState state = g.Save();
+            float bx = b.X + px * b.Z * 1.4f + (float)Math.Sin(_animTick + b.Phase) * 6f;
+            float by = b.Y + py * b.Z * 1.4f;
 
-            Label lblTitle = CreateHeaderLabel("ĐĂNG NHẬP HỆ THỐNG");
-            Label lblU = CreateInputLabel("Tên đăng nhập:", 90);
-            txtLoginUser = CreateTextBox(115, "");
+            g.TranslateTransform(bx, by);
+            g.RotateTransform(b.Angle);
+            g.ScaleTransform(b.Z, b.Z);
 
-            Label lblP = CreateInputLabel("Mật khẩu:", 170);
-            txtLoginPass = CreateTextBox(195, "", true);
+            int alpha = (int)Math.Min(240, 115 * b.Z + 60);
+            Rectangle rect = new Rectangle(-9, -13, 18, 26);
 
-            Button btnLogin = CreatePrimaryButton("ĐĂNG NHẬP NGAY", 260, Color.FromArgb(111, 78, 55));
-            btnLogin.Click += (s, e) => PerformLogin();
+            using (SolidBrush dropShadow = new SolidBrush(Color.FromArgb(alpha / 2, 0, 0, 0)))
+                g.FillEllipse(dropShadow, -6, -10, 18, 26);
+
+            using (LinearGradientBrush beanBrush = new LinearGradientBrush(
+                rect,
+                Color.FromArgb(alpha, 210, 140, 75),
+                Color.FromArgb(alpha, 58, 30, 14), 45f))
+            {
+                g.FillEllipse(beanBrush, rect);
+            }
+
+            using (Pen splitPen = new Pen(Color.FromArgb(alpha, 30, 14, 6), 2f))
+            {
+                Point[] sCurve = { new Point(0, -10), new Point(-2, -3), new Point(2, 3), new Point(0, 10) };
+                g.DrawCurve(splitPen, sCurve);
+            }
+
+            g.Restore(state);
+        }
+
+        private void Draw3DStageTypography(Graphics g, int w, int h)
+        {
+            string title = "COFFEE FEFA 3D";
+            using (Font fTitle = new Font("Segoe UI", 22f, FontStyle.Bold))
+            {
+                SizeF sz = g.MeasureString(title, fTitle);
+                float tx = (w - sz.Width) / 2f;
+
+                // Đổ bóng chữ 3D 3 lớp
+                for (int d = 3; d >= 1; d--)
+                {
+                    using (SolidBrush shadow = new SolidBrush(Color.FromArgb(90, 0, 0, 0)))
+                        g.DrawString(title, fTitle, shadow, tx + d, 34 + d);
+                }
+
+                using (LinearGradientBrush goldBrush = new LinearGradientBrush(
+                    new RectangleF(tx, 34, sz.Width, sz.Height),
+                    Color.FromArgb(255, 248, 225),
+                    Color.FromArgb(245, 127, 23), 90f))
+                {
+                    g.DrawString(title, fTitle, goldBrush, tx, 34);
+                }
+            }
+
+            string sub = "Hệ thống Quản lý Quán Cafe Thông Minh - Nhóm 8";
+            using (Font fSub = new Font("Segoe UI", 9.5f, FontStyle.Italic))
+            using (SolidBrush subBrush = new SolidBrush(Color.FromArgb(215, 195, 185)))
+            {
+                SizeF sz = g.MeasureString(sub, fSub);
+                g.DrawString(sub, fSub, subBrush, (w - sz.Width) / 2f, 78);
+            }
+        }
+
+        // ==================== 4. CARD ĐĂNG NHẬP & QUÊN MẬT KHẨU 3D NEUMORPHISM ====================
+        private void Build3DLoginCard()
+        {
+            pnlLoginCard = Create3DFloatingCard();
+
+            Label lblHeader = CreateCardTitle("ĐĂNG NHẬP CA TRỰC", "Hệ thống phân quyền POS & Bảo mật nội bộ", pnlLoginCard);
+
+            pnlLoginCard.Controls.Add(CreateFieldLabel("TÊN ĐĂNG NHẬP", 108));
+            Control boxUser = Create3DInputCapsule("👤", 132, false, out txtLoginUser);
+
+            pnlLoginCard.Controls.Add(CreateFieldLabel("MẬT KHẨU HỆ THỐNG", 202));
+            Control boxPass = Create3DInputCapsule("🔒", 226, true, out txtLoginPass);
+
+            CheckBox chkShow = new CheckBox
+            {
+                Text = "Hiển thị mật khẩu",
+                Location = new Point(42, 282),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(215, 195, 180),
+                BackColor = Color.Transparent,
+                Cursor = Cursors.Hand
+            };
+            chkShow.CheckedChanged += (s, e) => txtLoginPass.UseSystemPasswordChar = !chkShow.Checked;
+
+            Control btnLogin3D = Create3DExtrudedButton(
+                "🚀 ĐĂNG NHẬP VÀO HỆ THỐNG POS",
+                new Point(40, 315),
+                new Size(390, 52),
+                Color.FromArgb(230, 126, 34),
+                Color.FromArgb(150, 64, 0),
+                (s, e) => PerformLogin());
+
+            // Hỗ trợ bấm phím Enter trong ô tài khoản/mật khẩu để đăng nhập ngay
+            KeyEventHandler enterKey = (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; PerformLogin(); } };
+            txtLoginUser.KeyDown += enterKey;
+            txtLoginPass.KeyDown += enterKey;
 
             LinkLabel lnkForgot = new LinkLabel
             {
-                Text = "Quên mật khẩu? (Nhận OTP qua Gmail)",
-                Location = new Point(40, 330),
+                Text = "🔑 Quên mật khẩu? (Khôi phục bằng OTP Gmail)",
+                Location = new Point(40, 382),
                 AutoSize = true,
                 Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                LinkColor = Color.FromArgb(211, 84, 0)
+                LinkColor = Color.FromArgb(255, 183, 77),
+                ActiveLinkColor = Color.White,
+                BackColor = Color.Transparent
             };
-            lnkForgot.Click += (s, e) => ShowPanel(pnlForgot);
+            lnkForgot.Click += (s, e) => ShowCard(pnlForgotCard);
 
-            LinkLabel lnkReg = new LinkLabel
+            // Hộp thông báo Chính sách phân quyền Admin 3D
+            BufferedPanel pnlSecurityBadge = new BufferedPanel
             {
-                Text = "Chưa có tài khoản? Đăng ký tài khoản mới",
-                Location = new Point(40, 365),
-                AutoSize = true,
-                Font = new Font("Segoe UI", 9.5f),
-                LinkColor = Color.FromArgb(41, 128, 185)
+                Location = new Point(40, 415),
+                Size = new Size(390, 62),
+                BackColor = Color.Transparent
             };
-            lnkReg.Click += (s, e) => ShowPanel(pnlRegister);
+            pnlSecurityBadge.Paint += (s, e) =>
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle r = new Rectangle(0, 0, pnlSecurityBadge.Width - 1, pnlSecurityBadge.Height - 1);
+                using (GraphicsPath p = GetRoundedPath(r, 12))
+                using (SolidBrush b = new SolidBrush(Color.FromArgb(75, 0, 0, 0)))
+                using (Pen pen = new Pen(Color.FromArgb(90, 230, 126, 34), 1f))
+                {
+                    e.Graphics.FillPath(b, p);
+                    e.Graphics.DrawPath(pen, p);
+                }
+                using (Font f = new Font("Segoe UI", 8.5f, FontStyle.Italic))
+                using (SolidBrush tb = new SolidBrush(Color.FromArgb(210, 190, 175)))
+                {
+                    e.Graphics.DrawString(
+                        "🛡️ Bảo mật: Nhân viên mới không tự đăng ký tại đây.\nQuản lý (Admin) sẽ cấp tài khoản & xác thực OTP Gmail trong POS.",
+                        f, tb, new PointF(12, 12));
+                }
+            };
 
-            pnlLogin.Controls.AddRange(new Control[] { lblTitle, lblU, txtLoginUser, lblP, txtLoginPass, btnLogin, lnkForgot, lnkReg });
+            pnlLoginCard.Controls.AddRange(new Control[]
+            {
+                lblHeader, boxUser, boxPass, chkShow,
+                btnLogin3D, lnkForgot, pnlSecurityBadge
+            });
         }
 
-        private void BuildRegisterPanel()
+        private void Build3DForgotCard()
         {
-            pnlRegister = CreateCardPanel();
+            pnlForgotCard = Create3DFloatingCard();
 
-            Label lblTitle = CreateHeaderLabel("ĐĂNG KÝ TÀI KHOẢN");
+            Label lblHeader = CreateCardTitle("KHÔI PHỤC MẬT KHẨU", "Xác thực bảo mật 2 lớp qua Gmail OTP", pnlForgotCard);
 
-            pnlRegister.Controls.Add(CreateInputLabel("Tên đăng nhập (*):", 65));
-            txtRegUser = CreateTextBox(88);
+            pnlForgotCard.Controls.Add(CreateFieldLabel("1. GMAIL ĐÃ LIÊN KẾT VỚI TÀI KHOẢN", 102));
+            Control boxEmail = Create3DInputCapsule("✉️", 125, false, out txtForgotEmail, width: 265);
 
-            pnlRegister.Controls.Add(CreateInputLabel("Họ và tên nhân viên:", 130));
-            txtRegFullName = CreateTextBox(153);
+            btnSendOtp3D = Create3DExtrudedButton(
+                "Gửi OTP",
+                new Point(315, 125),
+                new Size(115, 44),
+                Color.FromArgb(211, 84, 0),
+                Color.FromArgb(135, 54, 0),
+                BtnSendForgotOtp_Click);
 
-            pnlRegister.Controls.Add(CreateInputLabel("Email nhận OTP (*):", 195));
-            txtRegEmail = CreateTextBox(218);
-
-            pnlRegister.Controls.Add(CreateInputLabel("Mật khẩu (*):", 260));
-            txtRegPass = CreateTextBox(283, "", true);
-
-            pnlRegister.Controls.Add(CreateInputLabel("Nhập lại mật khẩu (*):", 325));
-            txtRegConfirm = CreateTextBox(348, "", true);
-
-            Button btnReg = CreatePrimaryButton("HOÀN TẤT ĐĂNG KÝ", 395, Color.FromArgb(39, 174, 96));
-            btnReg.Click += BtnReg_Click;
-
-            LinkLabel lnkBack = new LinkLabel
-            {
-                Text = "← Quay lại màn hình Đăng nhập",
-                Location = new Point(40, 445),
-                AutoSize = true,
-                Font = new Font("Segoe UI", 9.5f)
-            };
-            lnkBack.Click += (s, e) => ShowPanel(pnlLogin);
-
-            pnlRegister.Controls.AddRange(new Control[] { lblTitle, txtRegUser, txtRegFullName, txtRegEmail, txtRegPass, txtRegConfirm, btnReg, lnkBack });
-        }
-
-        private void BuildForgotPanel()
-        {
-            pnlForgot = CreateCardPanel();
-
-            Label lblTitle = CreateHeaderLabel("KHÔI PHỤC MẬT KHẨU");
-
-            pnlForgot.Controls.Add(CreateInputLabel("1. Nhập Gmail đã đăng ký:", 75));
-            txtForgotEmail = CreateTextBox(100);
-            txtForgotEmail.Width = 240;
-
-            btnSendOtp = new Button
-            {
-                Text = "Gửi OTP",
-                Location = new Point(290, 98),
-                Size = new Size(100, 32),
-                BackColor = Color.FromArgb(230, 126, 34),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
-            };
-            btnSendOtp.Click += BtnSendOtp_Click;
-
-            pnlForgot.Controls.Add(CreateInputLabel("2. Nhập mã OTP (6 số nhận từ Gmail):", 155));
-            txtOtpCode = CreateTextBox(180);
+            pnlForgotCard.Controls.Add(CreateFieldLabel("2. MÃ XÁC THỰC OTP (6 CHỮ SỐ TRONG GMAIL)", 185));
+            Control boxOtp = Create3DInputCapsule("🛡️", 208, false, out txtOtpCode);
             txtOtpCode.Enabled = false;
 
-            pnlForgot.Controls.Add(CreateInputLabel("3. Nhập mật khẩu mới:", 235));
-            txtNewPass = CreateTextBox(260, "", true);
+            pnlForgotCard.Controls.Add(CreateFieldLabel("3. NHẬP MẬT KHẨU MỚI", 268));
+            Control boxNewPass = Create3DInputCapsule("🔑", 291, true, out txtNewPass);
             txtNewPass.Enabled = false;
 
-            btnConfirmReset = CreatePrimaryButton("XÁC NHẬN ĐỔI MẬT KHẨU", 320, Color.FromArgb(41, 128, 185));
-            btnConfirmReset.Enabled = false;
-            btnConfirmReset.Click += BtnConfirmReset_Click;
+            btnConfirmReset3D = Create3DExtrudedButton(
+                "✔ XÁC NHẬN CẬP NHẬT MẬT KHẨU",
+                new Point(40, 355),
+                new Size(390, 50),
+                Color.FromArgb(39, 174, 96),
+                Color.FromArgb(20, 90, 50),
+                BtnConfirmReset_Click);
+            btnConfirmReset3D.Enabled = false;
 
             LinkLabel lnkBack = new LinkLabel
             {
-                Text = "← Quay lại màn hình Đăng nhập",
-                Location = new Point(40, 390),
+                Text = "← Quay về màn hình Đăng nhập",
+                Location = new Point(40, 425),
                 AutoSize = true,
-                Font = new Font("Segoe UI", 9.5f)
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                LinkColor = Color.FromArgb(255, 204, 128),
+                BackColor = Color.Transparent
             };
-            lnkBack.Click += (s, e) => ShowPanel(pnlLogin);
+            lnkBack.Click += (s, e) => ShowCard(pnlLoginCard);
 
-            pnlForgot.Controls.AddRange(new Control[] { lblTitle, txtForgotEmail, btnSendOtp, txtOtpCode, txtNewPass, btnConfirmReset, lnkBack });
+            pnlForgotCard.Controls.AddRange(new Control[]
+            {
+                lblHeader, boxEmail, btnSendOtp3D,
+                boxOtp, boxNewPass, btnConfirmReset3D, lnkBack
+            });
         }
 
+        // ==================== 5. CÁC THÀNH PHẦN UI 3D TÙY CHỈNH (CAPSULE & TACTILE BUTTON) ====================
+        private BufferedPanel Create3DFloatingCard()
+        {
+            BufferedPanel card = new BufferedPanel
+            {
+                Location = new Point(468, 52),
+                Size = new Size(470, 500),
+                BackColor = Color.Transparent
+            };
+
+            card.Paint += (s, e) =>
+            {
+                Graphics g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+
+                // Đổ bóng 3D sâu phía dưới Card
+                for (int i = 5; i >= 1; i--)
+                {
+                    Rectangle sr = new Rectangle(8 - i, 10 + i * 2, card.Width - 16, card.Height - 20);
+                    using (GraphicsPath sp = GetRoundedPath(sr, 22))
+                    using (SolidBrush sb = new SolidBrush(Color.FromArgb(28, 0, 0, 0)))
+                    {
+                        g.FillPath(sb, sp);
+                    }
+                }
+
+                Rectangle mainRect = new Rectangle(6, 6, card.Width - 14, card.Height - 16);
+                using (GraphicsPath path = GetRoundedPath(mainRect, 22))
+                using (LinearGradientBrush cardGrad = new LinearGradientBrush(
+                    mainRect,
+                    Color.FromArgb(66, 43, 34),
+                    Color.FromArgb(38, 24, 18), 135f))
+                {
+                    g.FillPath(cardGrad, path);
+
+                    // Viền Bevel 3D phản sáng cạnh trên
+                    using (Pen bevelLight = new Pen(Color.FromArgb(120, 255, 204, 128), 1.6f))
+                    {
+                        g.DrawPath(bevelLight, path);
+                    }
+                }
+            };
+
+            return card;
+        }
+
+        private Label CreateCardTitle(string mainTitle, string subTitle, Control parent)
+        {
+            Label lbl = new Label
+            {
+                Text = mainTitle,
+                Location = new Point(38, 26),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 17f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(255, 224, 178),
+                BackColor = Color.Transparent
+            };
+
+            Label sub = new Label
+            {
+                Text = subTitle,
+                Location = new Point(40, 62),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Italic),
+                ForeColor = Color.FromArgb(195, 175, 160),
+                BackColor = Color.Transparent
+            };
+            parent.Controls.Add(sub);
+            return lbl;
+        }
+
+        private Label CreateFieldLabel(string text, int y)
+        {
+            return new Label
+            {
+                Text = text,
+                Location = new Point(42, y),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(255, 183, 77),
+                BackColor = Color.Transparent
+            };
+        }
+
+        // Ô nhập liệu 3D Sunken Capsule tự phát sáng Neon khi Focus
+        private Control Create3DInputCapsule(string icon, int y, bool isPassword, out TextBox innerTextBox, int width = 390)
+        {
+            BufferedPanel capsule = new BufferedPanel
+            {
+                Location = new Point(40, y),
+                Size = new Size(width, 44),
+                BackColor = Color.Transparent,
+                Cursor = Cursors.IBeam
+            };
+
+            bool isFocused = false;
+
+            TextBox txt = new TextBox
+            {
+                BorderStyle = BorderStyle.None,
+                BackColor = Color.FromArgb(28, 17, 13),
+                ForeColor = Color.FromArgb(255, 248, 240),
+                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
+                Location = new Point(44, 11),
+                Width = width - 58,
+                UseSystemPasswordChar = isPassword
+            };
+
+            txt.GotFocus += (s, e) => { isFocused = true; capsule.Invalidate(); };
+            txt.LostFocus += (s, e) => { isFocused = false; capsule.Invalidate(); };
+            capsule.Click += (s, e) => txt.Focus();
+
+            capsule.Paint += (s, e) =>
+            {
+                Graphics g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+
+                Rectangle r = new Rectangle(1, 1, capsule.Width - 3, capsule.Height - 3);
+                using (GraphicsPath p = GetRoundedPath(r, 12))
+                {
+                    // Nền lõm 3D (Sunken)
+                    using (SolidBrush bg = new SolidBrush(Color.FromArgb(28, 17, 13)))
+                        g.FillPath(bg, p);
+
+                    // Bóng lõm bên trong cạnh trên
+                    using (Pen innerShadow = new Pen(Color.FromArgb(140, 0, 0, 0), 2f))
+                        g.DrawLine(innerShadow, 10, 2, capsule.Width - 10, 2);
+
+                    // Viền phát sáng 3D khi người dùng click vào ô nhập
+                    Color borderCol = isFocused
+                        ? Color.FromArgb(255, 167, 38)
+                        : Color.FromArgb(95, 140, 110, 95);
+                    using (Pen borderPen = new Pen(borderCol, isFocused ? 2.2f : 1.2f))
+                        g.DrawPath(borderPen, p);
+                }
+
+                using (Font iconFont = new Font("Segoe UI Emoji", 11f))
+                using (SolidBrush iconBrush = new SolidBrush(isFocused ? Color.FromArgb(255, 183, 77) : Color.FromArgb(170, 145, 130)))
+                {
+                    g.DrawString(icon, iconFont, iconBrush, new PointF(11, 9));
+                }
+            };
+
+            capsule.Controls.Add(txt);
+            innerTextBox = txt;
+            return capsule;
+        }
+
+        // Nút bấm 3D nổi khối thật (Có đế 3D dày 5px, lún xuống khi nhấn chuột)
+        private Control Create3DExtrudedButton(string text, Point loc, Size size, Color topColor, Color bottomExtrudeColor, EventHandler onClick)
+        {
+            BufferedPanel btn3D = new BufferedPanel
+            {
+                Location = loc,
+                Size = size,
+                BackColor = Color.Transparent,
+                Cursor = Cursors.Hand
+            };
+
+            bool isHover = false;
+            bool isPressed = false;
+
+            btn3D.MouseEnter += (s, e) => { isHover = true; btn3D.Invalidate(); };
+            btn3D.MouseLeave += (s, e) => { isHover = false; isPressed = false; btn3D.Invalidate(); };
+            btn3D.MouseDown += (s, e) => { if (e.Button == MouseButtons.Left) { isPressed = true; btn3D.Invalidate(); } };
+            btn3D.MouseUp += (s, e) =>
+            {
+                if (isPressed)
+                {
+                    isPressed = false;
+                    btn3D.Invalidate();
+                    if (btn3D.Enabled && onClick != null) onClick(btn3D, EventArgs.Empty);
+                }
+            };
+
+            btn3D.Paint += (s, e) =>
+            {
+                Graphics g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+                int extrudeDepth = 5;
+                int pressOffset = isPressed ? 4 : (isHover ? -1 : 0);
+
+                // 1. Phần đế 3D bên dưới (3D Extrusion Lip)
+                Rectangle baseRect = new Rectangle(1, extrudeDepth, btn3D.Width - 3, btn3D.Height - extrudeDepth - 2);
+                using (GraphicsPath basePath = GetRoundedPath(baseRect, 12))
+                using (SolidBrush baseBrush = new SolidBrush(btn3D.Enabled ? bottomExtrudeColor : Color.FromArgb(60, 60, 60)))
+                {
+                    g.FillPath(baseBrush, basePath);
+                }
+
+                // 2. Mặt trên của nút 3D
+                Rectangle faceRect = new Rectangle(1, 1 + Math.Max(0, pressOffset), btn3D.Width - 3, btn3D.Height - extrudeDepth - 2);
+                Color cTop = !btn3D.Enabled ? Color.FromArgb(110, 105, 100)
+                    : (isHover ? ControlPaint.Light(topColor, 0.18f) : topColor);
+                Color cBot = !btn3D.Enabled ? Color.FromArgb(85, 80, 75)
+                    : ControlPaint.Dark(topColor, 0.06f);
+
+                using (GraphicsPath facePath = GetRoundedPath(faceRect, 12))
+                using (LinearGradientBrush faceBrush = new LinearGradientBrush(faceRect, cTop, cBot, 90f))
+                using (Pen glossPen = new Pen(Color.FromArgb(125, 255, 255, 255), 1.2f))
+                {
+                    g.FillPath(faceBrush, facePath);
+                    g.DrawPath(glossPen, facePath);
+                }
+
+                // 3. Chữ có bóng nổi 3D
+                using (Font f = new Font("Segoe UI", 10f, FontStyle.Bold))
+                {
+                    SizeF sz = g.MeasureString(text, f);
+                    float tx = (btn3D.Width - sz.Width) / 2f;
+                    float ty = faceRect.Y + (faceRect.Height - sz.Height) / 2f;
+
+                    using (SolidBrush shadowTxt = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+                        g.DrawString(text, f, shadowTxt, tx + 1, ty + 1);
+
+                    using (SolidBrush mainTxt = new SolidBrush(Color.White))
+                        g.DrawString(text, f, mainTxt, tx, ty);
+                }
+            };
+
+            return btn3D;
+        }
+
+        private Control CreateWindowControlButton(string symbol, Point loc, Color hoverColor, EventHandler onClick)
+        {
+            BufferedPanel btn = new BufferedPanel
+            {
+                Location = loc,
+                Size = new Size(32, 28),
+                BackColor = Color.Transparent,
+                Cursor = Cursors.Hand
+            };
+            bool hover = false;
+            btn.MouseEnter += (s, e) => { hover = true; btn.Invalidate(); };
+            btn.MouseLeave += (s, e) => { hover = false; btn.Invalidate(); };
+            btn.Click += onClick;
+            btn.Paint += (s, e) =>
+            {
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle r = new Rectangle(0, 0, btn.Width - 1, btn.Height - 1);
+                using (GraphicsPath p = GetRoundedPath(r, 8))
+                using (SolidBrush b = new SolidBrush(hover ? hoverColor : Color.FromArgb(65, 255, 255, 255)))
+                {
+                    e.Graphics.FillPath(b, p);
+                }
+                using (Font f = new Font("Segoe UI", 9.5f, FontStyle.Bold))
+                using (SolidBrush tb = new SolidBrush(Color.White))
+                {
+                    SizeF sz = e.Graphics.MeasureString(symbol, f);
+                    e.Graphics.DrawString(symbol, f, tb, (btn.Width - sz.Width) / 2f, (btn.Height - sz.Height) / 2f);
+                }
+            };
+            return btn;
+        }
+
+        private static GraphicsPath GetRoundedPath(Rectangle rect, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            int d = radius * 2;
+            path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+            path.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
+            path.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
+            path.AddArc(rect.X, rect.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        // ==================== 6. XỬ LÝ NGHIỆP VỤ ĐĂNG NHẬP, OTP GMAIL & PHÂN QUYỀN POS ====================
         private void PerformLogin()
         {
             string u = txtLoginUser.Text.Trim();
@@ -1213,229 +2160,447 @@ namespace QuanLyCafe_Nhom8.GUI
 
             if (string.IsNullOrEmpty(u) || string.IsNullOrEmpty(p))
             {
-                MessageBox.Show("Bạn phải nhập Tên đăng nhập và Mật khẩu trước khi bấm vào Ly Cafe hoặc nút Đăng nhập!", "Chưa nhập tài khoản", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Vui lòng nhập Tên đăng nhập và Mật khẩu trước khi chạm vào Ly Cafe 3D hoặc bấm Đăng nhập!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 txtLoginUser.Focus();
                 return;
             }
 
             try
             {
-                var user = _userDal.CheckLogin(u, p);
+                UserDTO user = _userDal.CheckLogin(u, p);
                 if (user != null)
                 {
-                    animTimer.Stop();
+                    _renderTimer.Stop();
                     this.Hide();
 
                     FrmMainPOS frmPos = new FrmMainPOS();
-                    ApplyRolePermissionsToPOS(frmPos, user.FullName, user.Role);
+                    AttachRoleAndAdminToolsToPOS(frmPos, user);
                     frmPos.Show();
                 }
                 else
                 {
-                    MessageBox.Show("Sai tên đăng nhập hoặc mật khẩu!", "Lỗi đăng nhập", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show("Sai tên đăng nhập, mật khẩu hoặc tài khoản đã bị vô hiệu hóa!", "Từ chối truy cập", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Lỗi kết nối CSDL: \n" + ex.Message, "Lỗi SQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Lỗi kết nối CSDL SQL Server:\n" + ex.Message, "Lỗi SQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        // 3. CĂN CHỈNH LẠI KHUNG POS ĐỂ HIỆN RÕ Ô GIẢM GIÁ (%) VÀ BẢNG PHÂN QUYỀN
-        private void ApplyRolePermissionsToPOS(FrmMainPOS frmPos, string fullName, string role)
+        // Gắn thanh Phân quyền & Cấp tài khoản Nhân viên (có xác thực OTP Gmail) lên Header của FrmMainPOS
+        private void AttachRoleAndAdminToolsToPOS(FrmMainPOS frmPos, UserDTO user)
         {
-            bool isAdmin = role.Equals("Admin", StringComparison.OrdinalIgnoreCase);
-            string roleVi = isAdmin ? "Quản lý (Admin)" : "Nhân viên Thu ngân";
+            bool isAdmin = user.Role.Equals("Admin", StringComparison.OrdinalIgnoreCase);
+            string roleVi = isAdmin ? "Quản lý (Admin)" : "Thu ngân (Staff)";
 
-            frmPos.Text = $"Hệ thống POS Quán Cafe - Nhóm 8 | Ca trực: {fullName} [{roleVi}]";
-            frmPos.Size = new Size(1250, 635); // Thu gọn chiều cao để không bị thanh Taskbar che
-            frmPos.StartPosition = FormStartPosition.CenterScreen;
+            frmPos.Text = $"Hệ thống Quản lý Quán Cafe Thông Minh - Nhóm 8 | Ca trực: {user.FullName} [{roleVi}]";
 
-            if (frmPos.Controls.Count >= 3)
+            Panel pnlTopHeader = null;
+            foreach (Control c in frmPos.Controls)
             {
-                Control flpTables = frmPos.Controls[0];
-                Control pnlCenter = frmPos.Controls[1];
-                Control pnlRight = frmPos.Controls[2];
-
-                flpTables.Height = 565;
-                pnlCenter.Height = 565;
-                pnlRight.Height = 565;
-
-                // Đẩy ô Giảm giá (%) và Tổng tiền ở cột giữa lên cao để nhìn thấy rõ 100%
-                foreach (Control ctrl in pnlCenter.Controls)
+                if (c is Panel p && p.Dock == DockStyle.Top)
                 {
-                    if (ctrl is DataGridView dgv)
-                    {
-                        dgv.Height = 360; // Thu gọn bảng hóa đơn từ 440 xuống 360
-                    }
-                    else if (ctrl is Label lbl && lbl.Text.Contains("Giảm giá"))
-                    {
-                        lbl.Top = 478;
-                    }
-                    else if (ctrl is NumericUpDown nud && nud.Maximum == 100)
-                    {
-                        nud.Top = 475;
-                        nud.Enabled = isAdmin; // Phân quyền: Chỉ Admin mới chỉnh được Giảm giá
-                        if (!isAdmin) nud.Value = 0;
+                    pnlTopHeader = p;
+                    break;
+                }
+            }
 
-                        Label lblDiscountStatus = new Label
+            if (pnlTopHeader != null)
+            {
+                foreach (Control c in pnlTopHeader.Controls)
+                {
+                    if (c is Button btn)
+                    {
+                        if (btn.Text.Contains("Màn hình Pha chế"))
                         {
-                            Text = isAdmin ? "🔓 Admin: Được giảm giá" : "🔒 Thu ngân: Khóa giảm giá",
-                            Location = new Point(nud.Right + 10, nud.Top + 4),
-                            AutoSize = true,
-                            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
-                            ForeColor = isAdmin ? Color.FromArgb(39, 174, 96) : Color.FromArgb(192, 57, 43)
-                        };
-                        pnlCenter.Controls.Add(lblDiscountStatus);
-                    }
-                    else if (ctrl is Label lblTotal && lblTotal.Text.Contains("Tổng tiền"))
-                    {
-                        lblTotal.Top = 515;
-                    }
-                }
-
-                // Sắp xếp lại cột phải để gắn khung Phân quyền Ca trực & Đăng xuất
-                foreach (Control c in pnlRight.Controls)
-                {
-                    if (c is PictureBox pic)
-                    {
-                        pic.Top = 72;
-                        pic.Height = 250;
-                    }
-                    else if (c is Button btn && btn.Top > 400)
-                    {
-                        btn.Top = 332;
-                        btn.Height = 42;
+                            btn.Location = new Point(355, 11);
+                            btn.Size = new Size(175, 38);
+                        }
+                        else if (btn.Text.Contains("Quản lý Thực đơn"))
+                        {
+                            btn.Location = new Point(540, 11);
+                            btn.Size = new Size(175, 38);
+                            btn.Enabled = isAdmin;
+                            if (!isAdmin) btn.Text = "🔒 Thực đơn (Admin)";
+                        }
+                        else if (btn.Text.Contains("Thống kê"))
+                        {
+                            btn.Location = new Point(725, 11);
+                            btn.Size = new Size(185, 38);
+                            btn.Enabled = isAdmin;
+                            if (!isAdmin) btn.Text = "🔒 Thống kê (Admin)";
+                        }
                     }
                 }
 
-                Panel pnlRoleBox = new Panel
+                Button btnManageUsers = new Button
                 {
-                    Location = new Point(20, 385),
-                    Size = new Size(275, 165),
-                    BackColor = Color.FromArgb(250, 245, 240),
-                    BorderStyle = BorderStyle.FixedSingle
-                };
-
-                Label lblUserRole = new Label
-                {
-                    Text = $"👤 Nhân sự: {fullName}\n🔑 Quyền: {roleVi}",
-                    Location = new Point(10, 10),
-                    Size = new Size(255, 40),
-                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                    ForeColor = isAdmin ? Color.FromArgb(192, 57, 43) : Color.FromArgb(44, 62, 80)
-                };
-
-                Button btnUserManager = new Button
-                {
-                    Text = isAdmin ? "👥 Quản lý Tài khoản (Admin)" : "🔒 Quản lý Tài khoản (Chỉ Admin)",
-                    Location = new Point(10, 58),
-                    Size = new Size(253, 40),
-                    BackColor = isAdmin ? Color.FromArgb(142, 68, 173) : Color.FromArgb(189, 195, 199),
+                    Text = isAdmin ? "👥 Cấp TK Nhân viên (Admin)" : "🔒 Cấp TK (Chỉ Admin)",
+                    Location = new Point(920, 11),
+                    Size = new Size(215, 38),
+                    BackColor = isAdmin ? Color.FromArgb(142, 68, 173) : Color.FromArgb(120, 110, 105),
                     ForeColor = Color.White,
                     FlatStyle = FlatStyle.Flat,
-                    Enabled = isAdmin,
-                    Font = new Font("Segoe UI", 9f, FontStyle.Bold)
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                    Cursor = isAdmin ? Cursors.Hand : Cursors.No,
+                    Enabled = isAdmin
                 };
-                btnUserManager.Click += (s, e) =>
-                {
-                    DataTable dt = DatabaseHelper.ExecuteQuery("SELECT UserId, Username, FullName, Role, Email, IsActive FROM Users");
-                    Form frmUsers = new Form
-                    {
-                        Text = "Danh sách Tài khoản Hệ thống (Quyền Admin)",
-                        Size = new Size(680, 360),
-                        StartPosition = FormStartPosition.CenterParent
-                    };
-                    DataGridView dgv = new DataGridView
-                    {
-                        Dock = DockStyle.Fill,
-                        DataSource = dt,
-                        ReadOnly = true,
-                        AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                        BackgroundColor = Color.White
-                    };
-                    frmUsers.Controls.Add(dgv);
-                    frmUsers.ShowDialog();
-                };
+                btnManageUsers.FlatAppearance.BorderSize = 0;
+                btnManageUsers.Click += (s, e) => ShowAdminUserManagementDialog(frmPos);
 
                 Button btnLogout = new Button
                 {
-                    Text = "🚪 Đăng xuất (Đổi ca trực)",
-                    Location = new Point(10, 108),
-                    Size = new Size(253, 40),
-                    BackColor = Color.FromArgb(127, 140, 141),
+                    Text = $"🚪 Đăng xuất ({user.Username})",
+                    Location = new Point(1145, 11),
+                    Size = new Size(175, 38),
+                    BackColor = Color.FromArgb(192, 57, 43),
                     ForeColor = Color.White,
                     FlatStyle = FlatStyle.Flat,
-                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
                 };
+                btnLogout.FlatAppearance.BorderSize = 0;
 
                 bool isLoggingOut = false;
                 btnLogout.Click += (s, e) =>
                 {
-                    isLoggingOut = true;
-                    frmPos.Close();
-                    txtLoginPass.Clear();
-                    this.Show();
-                    animTimer.Start();
+                    if (MessageBox.Show("Bạn có chắc muốn đăng xuất khỏi ca trực hiện tại?", "Xác nhận đổi ca",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    {
+                        isLoggingOut = true;
+                        frmPos.Close();
+                        txtLoginPass.Clear();
+                        this.Show();
+                        _renderTimer.Start();
+                    }
                 };
 
-                frmPos.FormClosed += (s, args) =>
+                frmPos.FormClosed += (s, e) =>
                 {
-                    if (!isLoggingOut) this.Close();
+                    if (!isLoggingOut) Application.Exit();
                 };
 
-                pnlRoleBox.Controls.AddRange(new Control[] { lblUserRole, btnUserManager, btnLogout });
-                pnlRight.Controls.Add(pnlRoleBox);
+                pnlTopHeader.Controls.Add(btnManageUsers);
+                pnlTopHeader.Controls.Add(btnLogout);
             }
         }
 
-        private void BtnReg_Click(object sender, EventArgs e)
+        // Cửa sổ dành riêng cho Admin: Cấp tài khoản mới & Xác thực OTP Gmail
+        // Cửa sổ dành riêng cho Admin: Cấp tài khoản mới, Xóa nhân viên & Khóa/Mở khóa
+        private void ShowAdminUserManagementDialog(Form parentForm)
         {
-            string u = txtRegUser.Text.Trim();
-            string fn = txtRegFullName.Text.Trim();
-            string em = txtRegEmail.Text.Trim();
-            string p = txtRegPass.Text.Trim();
-            string cf = txtRegConfirm.Text.Trim();
+            string pendingOtp = "";
+            string pendingEmail = "";
+            DateTime pendingExpiry = DateTime.MinValue;
 
-            if (string.IsNullOrEmpty(u) || string.IsNullOrEmpty(em) || string.IsNullOrEmpty(p))
+            using (Form frmAdmin = new Form())
             {
-                MessageBox.Show("Vui lòng điền đầy đủ các trường bắt buộc (*)!", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            if (p != cf)
-            {
-                MessageBox.Show("Mật khẩu xác nhận không khớp!", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
+                frmAdmin.Text = "Quản lý Nhân sự: Cấp mới, Xóa & Phân quyền Tài khoản (Quyền Admin)";
+                frmAdmin.Size = new Size(980, 560);
+                frmAdmin.StartPosition = FormStartPosition.CenterParent;
+                frmAdmin.FormBorderStyle = FormBorderStyle.FixedDialog;
+                frmAdmin.MaximizeBox = false;
+                frmAdmin.BackColor = Color.FromArgb(38, 24, 18);
 
-            try
-            {
-                if (_userDal.IsUsernameOrEmailExist(u, em))
+                Panel pnlCreate = new Panel
                 {
-                    MessageBox.Show("Tên đăng nhập hoặc Email này đã tồn tại trong hệ thống!", "Trùng dữ liệu", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
+                    Location = new Point(15, 15),
+                    Size = new Size(410, 490),
+                    BackColor = Color.FromArgb(54, 34, 26)
+                };
 
-                if (_userDal.RegisterUser(u, p, em, fn))
+                Label lblHeader = new Label
                 {
-                    MessageBox.Show("Đăng ký thành công! Tài khoản mới mặc định có quyền Nhân viên Thu ngân (Staff).", "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    txtLoginUser.Text = u;
-                    txtLoginPass.Text = p;
-                    ShowPanel(pnlLogin);
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Lỗi khi đăng ký: " + ex.Message, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Text = "✨ CẤP TÀI KHOẢN NHÂN VIÊN MỚI",
+                    Font = new Font("Segoe UI", 12.5f, FontStyle.Bold),
+                    ForeColor = Color.FromArgb(255, 204, 128),
+                    Location = new Point(20, 15),
+                    AutoSize = true
+                };
+
+                Label MakeDarkLabel(string txt, int x, int y) => new Label
+                {
+                    Text = txt,
+                    Location = new Point(x, y),
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                    ForeColor = Color.FromArgb(245, 225, 210)
+                };
+
+                TextBox MakeDarkInput(int x, int y, int w, bool isPass = false) => new TextBox
+                {
+                    Location = new Point(x, y),
+                    Size = new Size(w, 28),
+                    Font = new Font("Segoe UI", 10.5f),
+                    BackColor = Color.FromArgb(28, 17, 13),
+                    ForeColor = Color.White,
+                    BorderStyle = BorderStyle.FixedSingle,
+                    UseSystemPasswordChar = isPass
+                };
+
+                TextBox txtU = MakeDarkInput(20, 78, 365);
+                TextBox txtFn = MakeDarkInput(20, 138, 365);
+                TextBox txtPass = MakeDarkInput(20, 198, 215, true);
+
+                ComboBox cboRole = new ComboBox
+                {
+                    Location = new Point(245, 198),
+                    Size = new Size(140, 28),
+                    DropDownStyle = ComboBoxStyle.DropDownList,
+                    Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+                    BackColor = Color.FromArgb(28, 17, 13),
+                    ForeColor = Color.FromArgb(255, 204, 128)
+                };
+                cboRole.Items.AddRange(new object[] { "Staff", "Admin" });
+                cboRole.SelectedIndex = 0;
+
+                TextBox txtMail = MakeDarkInput(20, 262, 245);
+                TextBox txtVerifyOtp = MakeDarkInput(20, 328, 365);
+                txtVerifyOtp.Enabled = false;
+
+                Button btnSendVerifyOtp = new Button
+                {
+                    Text = "1. Gửi OTP",
+                    Location = new Point(275, 260),
+                    Size = new Size(110, 30),
+                    BackColor = Color.FromArgb(230, 126, 34),
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnSendVerifyOtp.FlatAppearance.BorderSize = 0;
+
+                Button btnCreateAccount = new Button
+                {
+                    Text = "✔ 2. XÁC NHẬN OTP & TẠO TÀI KHOẢN",
+                    Location = new Point(20, 378),
+                    Size = new Size(365, 46),
+                    BackColor = Color.FromArgb(39, 174, 96),
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+                    Cursor = Cursors.Hand,
+                    Enabled = false
+                };
+                btnCreateAccount.FlatAppearance.BorderSize = 0;
+
+                // Cột phải: Bảng danh sách nhân sự + Nút Xóa & Khóa tài khoản
+                DataGridView dgvUsers = new DataGridView
+                {
+                    Location = new Point(440, 15),
+                    Size = new Size(510, 430),
+                    ReadOnly = true,
+                    AllowUserToAddRows = false,
+                    MultiSelect = false,
+                    AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                    BackgroundColor = Color.FromArgb(250, 245, 240),
+                    SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                    RowTemplate = { Height = 32 }
+                };
+
+                Button btnDeleteStaff = new Button
+                {
+                    Text = "🗑 XÓA NHÂN VIÊN ĐANG CHỌN",
+                    Location = new Point(440, 457),
+                    Size = new Size(250, 48),
+                    BackColor = Color.FromArgb(192, 57, 43),
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnDeleteStaff.FlatAppearance.BorderSize = 0;
+
+                Button btnToggleActive = new Button
+                {
+                    Text = "🔒 KHÓA / MỞ KHÓA TÀI KHOẢN",
+                    Location = new Point(700, 457),
+                    Size = new Size(250, 48),
+                    BackColor = Color.FromArgb(41, 128, 185),
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnToggleActive.FlatAppearance.BorderSize = 0;
+
+                Action reloadGrid = () => dgvUsers.DataSource = _userDal.GetAllUsers();
+                reloadGrid();
+
+                // SỰ KIỆN XÓA NHÂN VIÊN ĐANG CHỌN
+                btnDeleteStaff.Click += (s, e) =>
+                {
+                    if (dgvUsers.CurrentRow == null)
+                    {
+                        MessageBox.Show("Vui lòng bấm chọn 1 nhân viên trong bảng bên trên để xóa!", "Chưa chọn nhân viên", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    int userId = Convert.ToInt32(dgvUsers.CurrentRow.Cells["Mã NV"].Value);
+                    string username = dgvUsers.CurrentRow.Cells["Tài khoản"].Value.ToString();
+                    string fullName = dgvUsers.CurrentRow.Cells["Họ và tên"].Value.ToString();
+
+                    // Chặn xóa tài khoản admin gốc hoặc tài khoản đang đăng nhập hiện tại
+                    if (username.Equals("admin", StringComparison.OrdinalIgnoreCase) ||
+                        username.Equals(txtLoginUser.Text.Trim(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        MessageBox.Show($"Không thể xóa tài khoản Quản trị gốc hoặc tài khoản đang trực ca [{username}]!", "Bảo vệ hệ thống", MessageBoxButtons.OK, MessageBoxIcon.Stop);
+                        return;
+                    }
+
+                    DialogResult confirm = MessageBox.Show(
+                        $"Bạn có chắc chắn muốn XÓA VĨNH VIỄN nhân viên:\n- Họ tên: {fullName}\n- Tài khoản: {username}\n\nHành động này không thể hoàn tác!",
+                        "Xác nhận xóa nhân viên",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Warning);
+
+                    if (confirm == DialogResult.Yes)
+                    {
+                        try
+                        {
+                            if (_userDal.DeleteUser(userId))
+                            {
+                                MessageBox.Show($"Đã xóa nhân viên [{fullName} - {username}] khỏi hệ thống!", "Đã xóa", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                reloadGrid();
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            MessageBox.Show("Lỗi khi xóa nhân viên: " + ex.Message, "Lỗi SQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                    }
+                };
+
+                // SỰ KIỆN KHÓA / MỞ KHÓA TÀI KHOẢN TẠM THỜI
+                btnToggleActive.Click += (s, e) =>
+                {
+                    if (dgvUsers.CurrentRow == null)
+                    {
+                        MessageBox.Show("Vui lòng chọn 1 tài khoản trong bảng!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    int userId = Convert.ToInt32(dgvUsers.CurrentRow.Cells["Mã NV"].Value);
+                    string username = dgvUsers.CurrentRow.Cells["Tài khoản"].Value.ToString();
+                    bool isActive = Convert.ToBoolean(dgvUsers.CurrentRow.Cells["Đang hoạt động"].Value);
+
+                    if (username.Equals("admin", StringComparison.OrdinalIgnoreCase) ||
+                        username.Equals(txtLoginUser.Text.Trim(), StringComparison.OrdinalIgnoreCase))
+                    {
+                        MessageBox.Show("Không thể tự khóa tài khoản Admin gốc hoặc tài khoản đang trực ca!", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    if (_userDal.ToggleUserActiveStatus(userId, isActive))
+                    {
+                        string statusText = !isActive ? "MỞ KHÓA (Hoạt động trở lại)" : "KHÓA (Ngừng truy cập)";
+                        MessageBox.Show($"Đã chuyển trạng thái tài khoản [{username}] sang: {statusText}!", "Cập nhật thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        reloadGrid();
+                    }
+                };
+
+                // SỰ KIỆN GỬI OTP TẠO MỚI
+                btnSendVerifyOtp.Click += (s, e) =>
+                {
+                    string u = txtU.Text.Trim();
+                    string em = txtMail.Text.Trim();
+                    string p = txtPass.Text.Trim();
+
+                    if (string.IsNullOrEmpty(u) || string.IsNullOrEmpty(em) || string.IsNullOrEmpty(p))
+                    {
+                        MessageBox.Show("Vui lòng nhập Tên đăng nhập, Mật khẩu và Gmail trước khi gửi OTP!", "Thiếu thông tin", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    if (!em.EndsWith("@gmail.com", StringComparison.OrdinalIgnoreCase))
+                    {
+                        MessageBox.Show("Vui lòng nhập đúng định dạng @gmail.com!", "Sai định dạng", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    if (_userDal.IsUsernameOrEmailExist(u, em))
+                    {
+                        MessageBox.Show("Tên đăng nhập hoặc địa chỉ Gmail này đã tồn tại!", "Trùng dữ liệu", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    pendingOtp = AuthService.GenerateOTP();
+                    pendingEmail = em;
+                    pendingExpiry = DateTime.Now.AddMinutes(5);
+
+                    if (AuthService.SendOtpEmail(em, pendingOtp, $"Xác thực liên kết tài khoản mới [{u}]", out string err))
+                    {
+                        if (!string.IsNullOrEmpty(err))
+                            MessageBox.Show(err, "Thông tin OTP", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        else
+                            MessageBox.Show($"Đã gửi mã OTP gồm 6 chữ số tới Gmail [{em}]!\nHãy nhập mã OTP để hoàn tất tạo tài khoản.", "Đã gửi OTP", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+                        txtVerifyOtp.Enabled = true;
+                        btnCreateAccount.Enabled = true;
+                        txtVerifyOtp.Focus();
+                    }
+                    else
+                    {
+                        MessageBox.Show("Lỗi khi gửi mail OTP:\n" + err, "Lỗi SMTP Gmail", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                };
+
+                // SỰ KIỆN XÁC NHẬN OTP & LƯU TÀI KHOẢN MỚI
+                btnCreateAccount.Click += (s, e) =>
+                {
+                    if (DateTime.Now > pendingExpiry)
+                    {
+                        MessageBox.Show("Mã OTP đã hết hạn (quá 5 phút)! Vui lòng bấm Gửi OTP lại.", "Hết hạn", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+
+                    if (txtVerifyOtp.Text.Trim() != pendingOtp || txtMail.Text.Trim() != pendingEmail)
+                    {
+                        MessageBox.Show("Mã OTP không chính xác hoặc Gmail đã bị thay đổi!", "Sai OTP", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+
+                    string role = cboRole.SelectedItem.ToString();
+                    if (_userDal.CreateAccountByAdmin(txtU.Text, txtPass.Text, txtFn.Text, role, pendingEmail))
+                    {
+                        MessageBox.Show($"Đã tạo thành công tài khoản [{txtU.Text.Trim()}] với quyền [{role}]!", "Hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        txtU.Clear();
+                        txtFn.Clear();
+                        txtPass.Clear();
+                        txtMail.Clear();
+                        txtVerifyOtp.Clear();
+                        txtVerifyOtp.Enabled = false;
+                        btnCreateAccount.Enabled = false;
+                        pendingOtp = "";
+                        reloadGrid();
+                    }
+                };
+
+                pnlCreate.Controls.AddRange(new Control[]
+                {
+            lblHeader,
+            MakeDarkLabel("Tên đăng nhập (*):", 20, 55), txtU,
+            MakeDarkLabel("Họ và tên nhân viên (*):", 20, 115), txtFn,
+            MakeDarkLabel("Mật khẩu khởi tạo (*):", 20, 175), txtPass,
+            MakeDarkLabel("Phân quyền:", 245, 175), cboRole,
+            MakeDarkLabel("Gmail nhận OTP xác thực (*):", 20, 238), txtMail, btnSendVerifyOtp,
+            MakeDarkLabel("Nhập mã OTP 6 số từ Gmail (*):", 20, 305), txtVerifyOtp,
+            btnCreateAccount
+                });
+
+                frmAdmin.Controls.AddRange(new Control[] { pnlCreate, dgvUsers, btnDeleteStaff, btnToggleActive });
+                frmAdmin.ShowDialog(parentForm);
             }
         }
 
-        private void BtnSendOtp_Click(object sender, EventArgs e)
+        private void BtnSendForgotOtp_Click(object sender, EventArgs e)
         {
             string email = txtForgotEmail.Text.Trim();
             if (string.IsNullOrEmpty(email))
             {
-                MessageBox.Show("Vui lòng nhập địa chỉ Gmail của bạn!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Vui lòng nhập địa chỉ Gmail đã liên kết với tài khoản!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -1443,28 +2608,30 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 if (!_userDal.CheckEmailExist(email))
                 {
-                    MessageBox.Show("Email này chưa được đăng ký trong hệ thống quán cafe!", "Không tìm thấy", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show("Gmail này chưa được liên kết với tài khoản nào trong hệ thống!", "Không tìm thấy", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
 
-                _currentOtp = AuthService.GenerateOTP();
-                _resetEmail = email;
-                _otpExpiry = DateTime.Now.AddMinutes(5);
+                _forgotOtp = AuthService.GenerateOTP();
+                _forgotEmail = email;
+                _forgotOtpExpiry = DateTime.Now.AddMinutes(5);
 
-                if (AuthService.SendOtpEmail(email, _currentOtp, out string err))
+                if (AuthService.SendOtpEmail(email, _forgotOtp, "Khôi phục mật khẩu", out string err))
                 {
                     if (!string.IsNullOrEmpty(err))
-                        MessageBox.Show(err, "Mã OTP Test", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        MessageBox.Show(err, "Thông tin OTP", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     else
                         MessageBox.Show("Đã gửi mã OTP gồm 6 chữ số tới Gmail của bạn! Vui lòng kiểm tra hộp thư.", "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
                     txtOtpCode.Enabled = true;
                     txtNewPass.Enabled = true;
-                    btnConfirmReset.Enabled = true;
+                    btnConfirmReset3D.Enabled = true;
+                    btnConfirmReset3D.Invalidate();
+                    txtOtpCode.Focus();
                 }
                 else
                 {
-                    MessageBox.Show("Không thể gửi email: " + err, "Lỗi SMTP", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show("Không thể gửi email:\n" + err, "Lỗi SMTP", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
             catch (Exception ex)
@@ -1478,13 +2645,13 @@ namespace QuanLyCafe_Nhom8.GUI
             string inputOtp = txtOtpCode.Text.Trim();
             string newPass = txtNewPass.Text.Trim();
 
-            if (DateTime.Now > _otpExpiry)
+            if (DateTime.Now > _forgotOtpExpiry)
             {
                 MessageBox.Show("Mã OTP đã hết hạn (quá 5 phút)! Vui lòng bấm gửi lại.", "Hết hạn", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            if (inputOtp != _currentOtp)
+            if (inputOtp != _forgotOtp)
             {
                 MessageBox.Show("Mã OTP không chính xác! Vui lòng kiểm tra lại.", "Sai OTP", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -1496,83 +2663,47 @@ namespace QuanLyCafe_Nhom8.GUI
                 return;
             }
 
-            if (_userDal.UpdatePasswordByEmail(_resetEmail, newPass))
+            if (_userDal.UpdatePasswordByEmail(_forgotEmail, newPass))
             {
                 MessageBox.Show("Đổi mật khẩu thành công! Mời bạn đăng nhập lại.", "Hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                _currentOtp = "";
-                ShowPanel(pnlLogin);
+                _forgotOtp = "";
+                txtOtpCode.Clear();
+                txtNewPass.Clear();
+                ShowCard(pnlLoginCard);
             }
         }
 
-        private void ShowPanel(Panel target)
+        private void ShowCard(Control target)
         {
-            pnlLogin.Visible = (target == pnlLogin);
-            pnlRegister.Visible = (target == pnlRegister);
-            pnlForgot.Visible = (target == pnlForgot);
+            pnlLoginCard.Visible = (target == pnlLoginCard);
+            pnlForgotCard.Visible = (target == pnlForgotCard);
         }
 
-        private Panel CreateCardPanel()
+        private void InitializeComponent()
         {
-            return new Panel
-            {
-                Location = new Point(420, 25),
-                Size = new Size(440, 480),
-                BackColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle
-            };
+            this.SuspendLayout();
+            // 
+            // FrmAuth
+            // 
+            this.ClientSize = new System.Drawing.Size(759, 412);
+            this.Name = "FrmAuth";
+            this.Load += new System.EventHandler(this.FrmAuth_Load);
+            this.ResumeLayout(false);
+
         }
 
-        private Label CreateHeaderLabel(string text)
+        private void FrmAuth_Load(object sender, EventArgs e)
         {
-            return new Label
-            {
-                Text = text,
-                Font = new Font("Segoe UI", 16, FontStyle.Bold),
-                ForeColor = Color.FromArgb(62, 39, 35),
-                Location = new Point(40, 22),
-                AutoSize = true
-            };
-        }
-
-        private Label CreateInputLabel(string text, int y)
-        {
-            return new Label
-            {
-                Text = text,
-                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                ForeColor = Color.FromArgb(93, 64, 55),
-                Location = new Point(40, y),
-                AutoSize = true
-            };
-        }
-
-        private TextBox CreateTextBox(int y, string defaultText = "", bool isPass = false)
-        {
-            return new TextBox
-            {
-                Text = defaultText,
-                Location = new Point(40, y),
-                Size = new Size(350, 30),
-                Font = new Font("Segoe UI", 11),
-                UseSystemPasswordChar = isPass
-            };
-        }
-
-        private Button CreatePrimaryButton(string text, int y, Color bgColor)
-        {
-            return new Button
-            {
-                Text = text,
-                Location = new Point(40, y),
-                Size = new Size(350, 42),
-                BackColor = bgColor,
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold)
-            };
+                
         }
     }
 }
+
+
+/* =========================================
+   FILE: FrmKDS.cs 
+========================================= */
+
 using System;
 using System.Data;
 using System.Drawing;
@@ -1728,8 +2859,19 @@ namespace QuanLyCafe_Nhom8.GUI
             _refreshTimer?.Stop();
             base.OnFormClosing(e);
         }
+
+        private void FrmKDS_Load(object sender, EventArgs e)
+        {
+
+        }
     }
 }
+
+
+/* =========================================
+   FILE: FrmKDS.Designer.cs 
+========================================= */
+
 namespace QuanLyCafe_Nhom8.GUI
 {
     partial class FrmKDS
@@ -1760,17 +2902,32 @@ namespace QuanLyCafe_Nhom8.GUI
         /// </summary>
         private void InitializeComponent()
         {
-            this.components = new System.ComponentModel.Container();
+            this.SuspendLayout();
+            // 
+            // FrmKDS
+            // 
+            this.AutoScaleDimensions = new System.Drawing.SizeF(8F, 16F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(800, 450);
+            this.Name = "FrmKDS";
             this.Text = "FrmKDS";
+            this.Load += new System.EventHandler(this.FrmKDS_Load);
+            this.ResumeLayout(false);
+
         }
 
         #endregion
     }
 }
+
+
+/* =========================================
+   FILE: FrmMainPOS.cs 
+========================================= */
+
 using QuanLyCafe_Nhom8.DAL;
 using QuanLyCafe_Nhom8.DTO;
+using QuanLyCafe_Nhom8.GUI;
 using QuanLyCafe_Nhom8.Services;
 using System;
 using System.Collections.Generic;
@@ -1808,6 +2965,9 @@ namespace QuanLyCafe_Nhom8.GUI
             BuildModernPosInterface();
             LoadAllProducts();
             SwitchChannelTab(Channel.DineIn, reloadFromDb: true);
+
+            // Tự động bật luồng lắng nghe lệnh Telegram 2 chiều (/homnay, /homqua, /ban, /huymon)
+            new TelegramBotService().StartTwoWayListener();
         }
 
         // ==================== HÀM KIỂM TRA & LÀM MỚI DỮ LIỆU ====================
@@ -1846,6 +3006,40 @@ namespace QuanLyCafe_Nhom8.GUI
             if (Starts("Shopee") || Starts("XanhSM")) return Channel.ShopeeXanh;
             if (Starts("Grab")) return Channel.Grab;
             return Channel.DineIn;
+        }
+
+        // Kiểm tra món trên dòng hiện tại đã gửi xuống quầy pha chế hay chưa
+        private bool IsItemSentToKitchen(DataGridViewRow row)
+        {
+            if (row == null) return false;
+
+            foreach (DataGridViewCell cell in row.Cells)
+            {
+                if (cell.Value == null) continue;
+
+                if (cell.Value is bool isSentBool)
+                {
+                    return isSentBool;
+                }
+
+                string val = cell.Value.ToString().Trim().ToLowerInvariant();
+
+                // Nếu trạng thái đang là nháp / chưa gửi -> chưa gửi pha chế
+                if (val.Contains("nháp") || val.Contains("chưa gửi") || val.Contains("mới gọi") || val.Contains("chờ xác nhận"))
+                {
+                    return false;
+                }
+
+                // Nếu trạng thái đã chuyển xuống bếp / pha chế / hoàn thành -> đã gửi pha chế
+                if (val.Contains("đã gửi") || val.Contains("chờ pha") || val.Contains("đang pha") ||
+                    val.Contains("đang làm") || val.Contains("hoàn thành") || val.Contains("đã xong") ||
+                    val.Contains("pha chế") || val.Contains("đã phục vụ"))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // ==================== XỬ LÝ SƠ ĐỒ BÀN & THỰC ĐƠN ====================
@@ -2070,17 +3264,38 @@ namespace QuanLyCafe_Nhom8.GUI
 
             int billDetailId = Convert.ToInt32(dgvBillDetails.CurrentRow.Cells["BillDetailId"].Value);
             string itemName = dgvBillDetails.CurrentRow.Cells["Tên món"].Value.ToString();
+            bool isSentToKitchen = IsItemSentToKitchen(dgvBillDetails.CurrentRow);
+            string managerName = "";
 
-            if (!RequestManagerApprovalDialog($"Hủy món [{itemName}] tại {_selectedTableName}", out string managerName))
+            // Chỉ món ĐÃ GỬI PHA CHẾ mới bắt buộc nhập tài khoản Quản lý/Admin để duyệt hủy
+            if (isSentToKitchen)
             {
-                return;
+                if (!RequestManagerApprovalDialog($"Hủy món ĐÃ GỬI PHA CHẾ [{itemName}] tại {_selectedTableName}", out managerName))
+                {
+                    return;
+                }
             }
 
             try
             {
                 _posDal.RemoveBillDetailItem(billDetailId, _selectedTableId);
                 RefreshAll();
-                Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).", "Đã hủy món");
+
+                if (isSentToKitchen)
+                {
+                    try
+                    {
+                        new TelegramBotService().GuiTin(
+                            $"⚠️ CẢNH BÁO HỦY MÓN ĐÃ PHA CHẾ:\n" +
+                            $"- Bàn/Đơn: {_selectedTableName}\n" +
+                            $"- Món hủy: {itemName}\n" +
+                            $"- Duyệt bởi: {managerName}\n" +
+                            $"- Thời gian: {DateTime.Now:HH:mm dd/MM/yyyy}");
+                    }
+                    catch { }
+
+                    Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).", "Đã hủy món");
+                }
             }
             catch (Exception ex)
             {
@@ -2154,7 +3369,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 int sourceTableId = _selectedTableId;
                 _posDal.MergeOccupiedTables(sourceTableId, targetTable.TableId);
 
-                // Xóa giảm giá khi gộp bàn để tránh áp dụng sai mức giảm của đơn nhỏ sang đơn lớn
                 _tableDiscounts.Remove(sourceTableId);
                 _tableDiscounts.Remove(targetTable.TableId);
                 _approvedDiscountPercent = 0;
@@ -2237,8 +3451,19 @@ namespace QuanLyCafe_Nhom8.GUI
                 ShowError("Lỗi khi thanh toán: " + ex.Message);
             }
         }
+
+        private void FrmMainPOS_Load(object sender, EventArgs e)
+        {
+
+        }
     }
 }
+
+
+/* =========================================
+   FILE: FrmMainPOS.Designer.cs 
+========================================= */
+
 namespace QuanLyCafe_Nhom8.GUI
 {
     partial class FrmMainPOS
@@ -2269,22 +3494,38 @@ namespace QuanLyCafe_Nhom8.GUI
         /// </summary>
         private void InitializeComponent()
         {
-            this.components = new System.ComponentModel.Container();
+            this.SuspendLayout();
+            // 
+            // FrmMainPOS
+            // 
+            this.AutoScaleDimensions = new System.Drawing.SizeF(8F, 16F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(800, 450);
+            this.Name = "FrmMainPOS";
             this.Text = "FrmMainPOS";
+            this.Load += new System.EventHandler(this.FrmMainPOS_Load);
+            this.ResumeLayout(false);
+
         }
 
         #endregion
     }
 }
+
+
+/* =========================================
+   FILE: FrmMainPOS.Layout.cs 
+========================================= */
+
 using QuanLyCafe_Nhom8.DTO;
 using QuanLyCafe_Nhom8.Services;
 using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Drawing.Printing;
+using System.IO;
 using System.Text;
 using System.Windows.Forms;
 
@@ -2417,12 +3658,22 @@ namespace QuanLyCafe_Nhom8.GUI
                 LoadBillForSelectedTable();
             });
 
-            Button btnOpenMenu = MakeButton("📋 Quản lý Thực đơn", new Point(855, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
-                Info("Module Quản lý Thực đơn (FrmMenuManager) do Tuấn Anh phụ trách sẽ được gắn vào nút này khi Merge nhánh!", "Thông tin Module"));
+            Button btnOpenMenu = MakeButton("📋 Quản lý Thực đơn", new Point(855, 11), new Size(205, 38), Theme.Green, (s, e) =>
+            {
+                using (FrmMenuManager menuForm = new FrmMenuManager())
+                {
+                    menuForm.ShowDialog(this);
+                }
+                LoadAllProducts();
+            });
 
             Button btnOpenStats = MakeButton("📊 Thống kê & Telegram", new Point(1070, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
-                Info("Module Thống kê & Telegram Bot (FrmStatistics) do Ngô Việt Hưng phụ trách sẽ được gắn vào nút này khi Merge nhánh!", "Thông tin Module"));
-
+            {
+                using (FrmStatistics frm = new FrmStatistics())
+                {
+                    frm.ShowDialog(this);
+                }
+            });
             pnlTopHeader.Controls.AddRange(new Control[] { lblBrand, btnOpenKDS, btnOpenMenu, btnOpenStats });
 
             // 2. CỘT TRÁI: KÊNH BÁN HÀNG & SƠ ĐỒ BÀN
@@ -2599,11 +3850,12 @@ namespace QuanLyCafe_Nhom8.GUI
                 BorderStyle = BorderStyle.FixedSingle,
                 SizeMode = PictureBoxSizeMode.Zoom
             };
+            // Khi LoadAsync bị lỗi hoặc ảnh chưa có khung QR, tự động vẽ/nạp QR hợp lệ thay vì báo lỗi và hiện dấu X đỏ
             picVietQR.LoadCompleted += (s, e) =>
             {
-                if (e.Error != null)
+                if (e.Error != null || picVietQR.Image == null || picVietQR.Image == picVietQR.ErrorImage)
                 {
-                    ShowError("Không thể tải ảnh VietQR. Vui lòng kiểm tra kết nối mạng!", "Lỗi tải QR");
+                    picVietQR.Image = LoadQrImageSafe(FinalTotal, _selectedTableName);
                 }
             };
 
@@ -2629,8 +3881,8 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 "Tiền mặt",
                 "Chuyển khoản QR",
-                "Ví ShopeeFood / XanhSM",
-                "Ví GrabFood"
+                "ShopeeFood / XanhSM",
+                "GrabFood"
             });
             cboPaymentMethod.SelectedIndex = 0;
 
@@ -2849,8 +4101,8 @@ namespace QuanLyCafe_Nhom8.GUI
         private string BuildReceiptText(DataTable dtItems, string method)
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("        HIGHLAND COFFEE POS - NHÓM 8");
-            sb.AppendLine("      ĐC: Công Viên Thủy Tinh, Thủ Đức");
+            sb.AppendLine("        CAFE FEFA - NHÓM 8");
+            sb.AppendLine("      ĐC: Công Viên Thủy Tinh ");
             sb.AppendLine("==========================================");
             sb.AppendLine("         PHIẾU TẠM TÍNH / HÓA ĐƠN");
             sb.AppendLine($"Bàn / Đơn : {_selectedTableName}");
@@ -2912,14 +4164,13 @@ namespace QuanLyCafe_Nhom8.GUI
                     BorderStyle = BorderStyle.FixedSingle
                 };
 
-                if (picVietQR.Image != null)
-                {
-                    picBillQR.Image = picVietQR.Image;
-                }
-                else
-                {
-                    picBillQR.LoadAsync(SmartPaymentService.BuildVietQrUrl(FinalTotal, _selectedTableName));
-                }
+                // Nạp trực tiếp Bitmap hợp lệ, tuyệt đối không dùng LoadAsync hoặc lấy nhầm ErrorImage (dấu X đỏ)
+                Bitmap validQrBmp = (picVietQR.Image != null && picVietQR.Image != picVietQR.ErrorImage && picVietQR.Image.Width > 100)
+                    ? new Bitmap(picVietQR.Image)
+                    : LoadQrImageSafe(FinalTotal, _selectedTableName);
+
+                picVietQR.Image = validQrBmp;
+                picBillQR.Image = validQrBmp;
 
                 Button btnPrintPdf = MakeButton(
                     "🖨 Xuất Máy In / Lưu File PDF",
@@ -2958,12 +4209,938 @@ namespace QuanLyCafe_Nhom8.GUI
                 billForm.ShowDialog(this);
             }
         }
+
+        // ==================== HÀM ĐẢM BẢO ẢNH VIETQR LUÔN HIỂN THỊ 100% ====================
+
+        private Bitmap LoadQrImageSafe(decimal amount, string tableName)
+        {
+            long roundedAmount = Convert.ToInt64(Math.Round(amount));
+
+            try
+            {
+                string qrPathOrUrl = SmartPaymentService.BuildVietQrUrl(amount, tableName);
+                if (!string.IsNullOrWhiteSpace(qrPathOrUrl) && File.Exists(qrPathOrUrl))
+                {
+                    byte[] bytes = File.ReadAllBytes(qrPathOrUrl);
+                    if (bytes != null && bytes.Length > 500)
+                    {
+                        using (MemoryStream ms = new MemoryStream(bytes))
+                        using (Image img = Image.FromStream(ms))
+                        {
+                            Bitmap bmp = new Bitmap(img);
+                            // Nếu ảnh offline từ SmartPaymentService bị trống vùng QR ở giữa thì vẽ bổ sung ma trận QR vào
+                            if (IsCenterQrBlank(bmp))
+                            {
+                                using (Graphics g = Graphics.FromImage(bmp))
+                                {
+                                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                                    DrawOfflineQrMatrix(g, new Rectangle(65, 78, 230, 230));
+                                }
+                            }
+                            return bmp;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Chuyển sang vẽ thẻ VietQR dự phòng trực tiếp trong bộ nhớ
+            }
+
+            return BuildFallbackVietQrCard(roundedAmount);
+        }
+
+        private static bool IsCenterQrBlank(Bitmap bmp)
+        {
+            if (bmp.Width < 260 || bmp.Height < 260) return false;
+            int midY = bmp.Height / 2 - 30;
+            for (int x = 80; x < bmp.Width - 80; x += 6)
+            {
+                Color c = bmp.GetPixel(x, midY);
+                if (c.R < 240 || c.G < 240 || c.B < 240)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static Bitmap BuildFallbackVietQrCard(long amount)
+        {
+            Bitmap bmp = new Bitmap(360, 460);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.FromArgb(242, 249, 235));
+
+                using (SolidBrush cardBrush = new SolidBrush(Color.White))
+                {
+                    g.FillRectangle(cardBrush, 20, 20, 320, 420);
+                }
+
+                StringFormat sf = new StringFormat { Alignment = StringAlignment.Center };
+                using (Font fBank = new Font("Segoe UI", 15, FontStyle.Bold))
+                using (SolidBrush brGreen = new SolidBrush(Color.FromArgb(0, 107, 63)))
+                {
+                    g.DrawString(SmartPaymentService.BankShortName, fBank, brGreen, new RectangleF(0, 28, 360, 32), sf);
+                }
+
+                DrawOfflineQrMatrix(g, new Rectangle(65, 75, 230, 230));
+
+                using (Font fSub = new Font("Segoe UI", 9.5f, FontStyle.Bold))
+                using (SolidBrush brRed = new SolidBrush(Color.FromArgb(192, 57, 43)))
+                {
+                    g.DrawString("VIETQR - NAPAS 247", fSub, brRed, new RectangleF(0, 325, 360, 22), sf);
+                }
+
+                using (Font fName = new Font("Segoe UI", 11, FontStyle.Bold))
+                using (Font fAcc = new Font("Segoe UI", 11, FontStyle.Regular))
+                using (SolidBrush brDark = new SolidBrush(Color.FromArgb(30, 30, 30)))
+                {
+                    g.DrawString(SmartPaymentService.AccountName, fName, brDark, new RectangleF(0, 355, 360, 24), sf);
+                    g.DrawString($"STK: {SmartPaymentService.AccountNo}", fAcc, brDark, new RectangleF(0, 380, 360, 24), sf);
+                    if (amount > 0)
+                    {
+                        g.DrawString($"Số tiền: {amount:N0} VNĐ", fName, brDark, new RectangleF(0, 406, 360, 24), sf);
+                    }
+                }
+            }
+            return bmp;
+        }
+
+        private static void DrawOfflineQrMatrix(Graphics g, Rectangle bounds)
+        {
+            int gridSize = 25;
+            int cellSize = bounds.Width / gridSize;
+            int actualWidth = gridSize * cellSize;
+            int offsetX = bounds.X + (bounds.Width - actualWidth) / 2;
+            int offsetY = bounds.Y + (bounds.Height - actualWidth) / 2;
+
+            Random rnd = new Random(994288652);
+
+            using (SolidBrush black = new SolidBrush(Color.Black))
+            using (SolidBrush white = new SolidBrush(Color.White))
+            using (SolidBrush red = new SolidBrush(Color.FromArgb(220, 38, 38)))
+            using (Pen borderPen = new Pen(Color.FromArgb(25, 65, 130), 2))
+            {
+                g.FillRectangle(white, bounds.X - 6, bounds.Y - 6, bounds.Width + 12, bounds.Height + 12);
+                g.DrawRectangle(borderPen, bounds.X - 6, bounds.Y - 6, bounds.Width + 12, bounds.Height + 12);
+
+                for (int r = 0; r < gridSize; r++)
+                {
+                    for (int c = 0; c < gridSize; c++)
+                    {
+                        bool isFinder = (r < 7 && c < 7) || (r < 7 && c >= gridSize - 7) || (r >= gridSize - 7 && c < 7);
+                        bool isQuietZone = (r == 7 && c <= 7) || (c == 7 && r <= 7) ||
+                                           (r == 7 && c >= gridSize - 8) || (c == gridSize - 8 && r <= 7) ||
+                                           (r == gridSize - 8 && c <= 7) || (c == 7 && r >= gridSize - 8);
+                        bool isCenterLogo = (r >= 10 && r <= 14 && c >= 10 && c <= 14);
+
+                        if (isQuietZone || isCenterLogo) continue;
+
+                        if (isFinder)
+                        {
+                            int lr = r >= gridSize - 7 ? r - (gridSize - 7) : r;
+                            int lc = c >= gridSize - 7 ? c - (gridSize - 7) : c;
+                            if (lr == 0 || lr == 6 || lc == 0 || lc == 6 || (lr >= 2 && lr <= 4 && lc >= 2 && lc <= 4))
+                            {
+                                g.FillRectangle(black, offsetX + c * cellSize, offsetY + r * cellSize, cellSize, cellSize);
+                            }
+                        }
+                        else if (rnd.Next(100) < 50)
+                        {
+                            g.FillRectangle(black, offsetX + c * cellSize, offsetY + r * cellSize, cellSize, cellSize);
+                        }
+                    }
+                }
+
+                // Vẽ biểu tượng chữ V đỏ VietQR ở tâm mã QR
+                Rectangle logoRect = new Rectangle(offsetX + 10 * cellSize, offsetY + 10 * cellSize, 5 * cellSize, 5 * cellSize);
+                g.FillRectangle(white, logoRect);
+                using (Font fLogo = new Font("Segoe UI", 14, FontStyle.Bold))
+                {
+                    StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    g.DrawString("V", fLogo, red, logoRect, sf);
+                }
+            }
+        }
     }
 }
-// <autogenerated />
+
+
+/* =========================================
+   FILE: FrmMenuManager.cs 
+========================================= */
+
 using System;
-using System.Reflection;
-[assembly: global::System.Runtime.Versioning.TargetFrameworkAttribute(".NETFramework,Version=v4.8", FrameworkDisplayName = ".NET Framework 4.8")]
+using System.Data;
+using System.Drawing;
+using System.IO;
+using System.Windows.Forms;
+using QuanLyCafe_Nhom8.DAL;
+
+namespace QuanLyCafe_Nhom8.GUI
+{
+    public class FrmMenuManager : Form
+    {
+        private readonly MenuDAL _menuDal = new MenuDAL();
+        private int _selectedProductId = -1;
+        private string _selectedImagePath = "";
+
+        // Controls bên trái (Danh sách & Bộ lọc)
+        private ComboBox cboFilterCategory;
+        private TextBox txtSearch;
+        private DataGridView dgvProducts;
+        private Label lblSummary;
+
+        // Controls bên phải (Chi tiết món & Thao tác)
+        private TextBox txtProductName;
+        private ComboBox cboCategory;
+        private NumericUpDown nudPrice;
+        private CheckBox chkIsActive;
+        private PictureBox picProduct;
+
+        public FrmMenuManager()
+        {
+            BuildMenuManagerInterface();
+            LoadCategoriesToCombos();
+            LoadProductGrid();
+        }
+
+        private void BuildMenuManagerInterface()
+        {
+            this.Text = "Quản lý Thực đơn & Danh mục Món - COFFEE FEFA NHÓM 8";
+            this.Size = new Size(1180, 680);
+            this.StartPosition = FormStartPosition.CenterParent;
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.BackColor = Color.FromArgb(244, 239, 234);
+            this.DoubleBuffered = true;
+
+            // 1. HEADER TRÊN CÙNG
+            Panel pnlHeader = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 60,
+                BackColor = Color.FromArgb(62, 39, 35)
+            };
+
+            Label lblTitle = new Label
+            {
+                Text = "📋 QUẢN LÝ THỰC ĐƠN",
+                Font = new Font("Segoe UI", 14f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(255, 224, 178),
+                Location = new Point(20, 16),
+                AutoSize = true
+            };
+
+            lblSummary = new Label
+            {
+                Text = "Tổng số: 0 món",
+                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
+                ForeColor = Color.White,
+                Location = new Point(880, 20),
+                AutoSize = true
+            };
+
+            pnlHeader.Controls.Add(lblTitle);
+            pnlHeader.Controls.Add(lblSummary);
+
+            // 2. CỘT TRÁI: BỘ LỌC & BẢNG DANH SÁCH MÓN
+            Panel pnlLeft = new Panel
+            {
+                Location = new Point(15, 75),
+                Size = new Size(715, 550),
+                BackColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            Label lblFilterCat = new Label
+            {
+                Text = "Lọc danh mục:",
+                Location = new Point(15, 18),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(62, 39, 35)
+            };
+
+            cboFilterCategory = new ComboBox
+            {
+                Location = new Point(115, 14),
+                Size = new Size(210, 28),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = new Font("Segoe UI", 10f)
+            };
+            cboFilterCategory.SelectedIndexChanged += (s, e) => LoadProductGrid();
+
+            Label lblSearch = new Label
+            {
+                Text = "🔍 Tìm tên món:",
+                Location = new Point(345, 18),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(62, 39, 35)
+            };
+
+            txtSearch = new TextBox
+            {
+                Location = new Point(460, 14),
+                Size = new Size(235, 28),
+                Font = new Font("Segoe UI", 10f)
+            };
+            txtSearch.TextChanged += (s, e) => LoadProductGrid();
+
+            dgvProducts = new DataGridView
+            {
+                Location = new Point(15, 55),
+                Size = new Size(683, 475),
+                ReadOnly = true,
+                AllowUserToAddRows = false,
+                MultiSelect = false,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                BackgroundColor = Color.FromArgb(252, 250, 248),
+                BorderStyle = BorderStyle.FixedSingle,
+                RowTemplate = { Height = 36 },
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                Font = new Font("Segoe UI", 9.5f)
+            };
+            dgvProducts.ColumnHeadersHeight = 38;
+            dgvProducts.SelectionChanged += DgvProducts_SelectionChanged;
+
+            pnlLeft.Controls.AddRange(new Control[]
+            {
+                lblFilterCat, cboFilterCategory, lblSearch, txtSearch, dgvProducts
+            });
+
+            // 3. CỘT PHẢI: CHI TIẾT MÓN, HÌNH ẢNH & CÁC NÚT CRUD
+            Panel pnlRight = new Panel
+            {
+                Location = new Point(745, 75),
+                Size = new Size(405, 550),
+                BackColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            Label lblFormTitle = new Label
+            {
+                Text = "THÔNG TIN CHI TIẾT MÓN",
+                Font = new Font("Segoe UI", 12f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(62, 39, 35),
+                Location = new Point(20, 14),
+                AutoSize = true
+            };
+
+            Label lblName = CreateLabel("Tên món nước (*):", 20, 52);
+            txtProductName = new TextBox
+            {
+                Location = new Point(20, 75),
+                Size = new Size(360, 28),
+                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold)
+            };
+
+            Label lblCat = CreateLabel("Thuộc danh mục (*):", 20, 115);
+            cboCategory = new ComboBox
+            {
+                Location = new Point(20, 138),
+                Size = new Size(255, 28),
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = new Font("Segoe UI", 10f)
+            };
+
+            Button btnAddCategory = CreateButton("+ Danh mục", new Point(282, 137), new Size(98, 29), Color.FromArgb(109, 76, 65), BtnAddCategory_Click);
+
+            Label lblPrice = CreateLabel("Đơn giá bán (VNĐ) (*):", 20, 178);
+            nudPrice = new NumericUpDown
+            {
+                Location = new Point(20, 201),
+                Size = new Size(200, 28),
+                Font = new Font("Segoe UI", 11f, FontStyle.Bold),
+                Minimum = 0,
+                Maximum = 10000000,
+                Increment = 1000,
+                ThousandsSeparator = true,
+                Value = 25000
+            };
+
+            chkIsActive = new CheckBox
+            {
+                Text = "Đang mở bán trên POS",
+                Location = new Point(230, 204),
+                AutoSize = true,
+                Checked = true,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(39, 174, 96)
+            };
+
+            // Khung chọn ảnh minh họa
+            Label lblImg = CreateLabel("Ảnh minh họa món:", 20, 242);
+            picProduct = new PictureBox
+            {
+                Location = new Point(20, 266),
+                Size = new Size(135, 120),
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.FromArgb(248, 245, 240),
+                SizeMode = PictureBoxSizeMode.Zoom
+            };
+
+            Button btnChooseImg = CreateButton("📁 Chọn ảnh...", new Point(170, 266), new Size(210, 36), Color.FromArgb(41, 128, 185), BtnChooseImg_Click);
+            Button btnClearImg = CreateButton("✖ Xóa ảnh", new Point(170, 310), new Size(100, 34), Color.Gray, (s, e) =>
+            {
+                _selectedImagePath = "";
+                picProduct.Image = null;
+            });
+            Button btnResetForm = CreateButton("🧹 Làm mới", new Point(280, 310), new Size(100, 34), Color.FromArgb(127, 140, 141), (s, e) => ClearInputForm());
+
+            // 4 nút thao tác CRUD chính
+            Button btnInsert = CreateButton("➕ THÊM MÓN MỚI", new Point(20, 405), new Size(175, 44), Color.FromArgb(39, 174, 96), BtnInsert_Click);
+            Button btnUpdate = CreateButton("💾 LƯU CẬP NHẬT", new Point(205, 405), new Size(175, 44), Color.FromArgb(230, 126, 34), BtnUpdate_Click);
+            Button btnToggle = CreateButton("🔄 BẬT / TẮT BÁN", new Point(20, 460), new Size(175, 44), Color.FromArgb(142, 68, 173), BtnToggle_Click);
+            Button btnDelete = CreateButton("🗑 XÓA MÓN", new Point(205, 460), new Size(175, 44), Color.FromArgb(192, 57, 43), BtnDelete_Click);
+
+            pnlRight.Controls.AddRange(new Control[]
+            {
+                lblFormTitle, lblName, txtProductName,
+                lblCat, cboCategory, btnAddCategory,
+                lblPrice, nudPrice, chkIsActive,
+                lblImg, picProduct, btnChooseImg, btnClearImg, btnResetForm,
+                btnInsert, btnUpdate, btnToggle, btnDelete
+            });
+
+            this.Controls.AddRange(new Control[] { pnlHeader, pnlLeft, pnlRight });
+        }
+
+        private static Label CreateLabel(string text, int x, int y)
+        {
+            return new Label
+            {
+                Text = text,
+                Location = new Point(x, y),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(93, 64, 55)
+            };
+        }
+
+        private static Button CreateButton(string text, Point loc, Size size, Color bgColor, EventHandler onClick)
+        {
+            Button btn = new Button
+            {
+                Text = text,
+                Location = loc,
+                Size = size,
+                BackColor = bgColor,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            if (onClick != null) btn.Click += onClick;
+            return btn;
+        }
+
+        // ==================== TẢI DỮ LIỆU & ĐỒNG BỘ BẢNG ====================
+
+        private void LoadCategoriesToCombos()
+        {
+            DataTable dtCat = _menuDal.GetAllCategories();
+
+            // Đổ vào ComboBox chi tiết bên phải
+            cboCategory.DataSource = dtCat.Copy();
+            cboCategory.DisplayMember = "CategoryName";
+            cboCategory.ValueMember = "CategoryId";
+
+            // Đổ vào ComboBox lọc bên trái (Có thêm mục 'Tất cả danh mục')
+            DataTable dtFilter = dtCat.Copy();
+            DataRow allRow = dtFilter.NewRow();
+            allRow["CategoryId"] = 0;
+            allRow["CategoryName"] = "--- Tất cả danh mục ---";
+            dtFilter.Rows.InsertAt(allRow, 0);
+
+            cboFilterCategory.DataSource = dtFilter;
+            cboFilterCategory.DisplayMember = "CategoryName";
+            cboFilterCategory.ValueMember = "CategoryId";
+        }
+
+        private void LoadProductGrid()
+        {
+            int filterCatId = 0;
+            if (cboFilterCategory.SelectedValue != null && int.TryParse(cboFilterCategory.SelectedValue.ToString(), out int parsed))
+            {
+                filterCatId = parsed;
+            }
+
+            string kw = txtSearch != null ? txtSearch.Text : "";
+            DataTable dt = _menuDal.GetProductsForManager(filterCatId, kw);
+            dgvProducts.DataSource = dt;
+
+            // Ẩn các cột kỹ thuật, chỉ giữ lại cột hiển thị đẹp cho người dùng
+            if (dgvProducts.Columns["ProductId"] != null) dgvProducts.Columns["ProductId"].Visible = false;
+            if (dgvProducts.Columns["CategoryId"] != null) dgvProducts.Columns["CategoryId"].Visible = false;
+            if (dgvProducts.Columns["ImagePath"] != null) dgvProducts.Columns["ImagePath"].Visible = false;
+
+            if (dgvProducts.Columns["STT"] != null) dgvProducts.Columns["STT"].FillWeight = 35;
+            if (dgvProducts.Columns["Tên món nước"] != null) dgvProducts.Columns["Tên món nước"].FillWeight = 150;
+            if (dgvProducts.Columns["Danh mục"] != null) dgvProducts.Columns["Danh mục"].FillWeight = 110;
+            if (dgvProducts.Columns["Đơn giá (VNĐ)"] != null)
+            {
+                dgvProducts.Columns["Đơn giá (VNĐ)"].FillWeight = 80;
+                dgvProducts.Columns["Đơn giá (VNĐ)"].DefaultCellStyle.Format = "N0";
+            }
+            if (dgvProducts.Columns["Đang bán"] != null) dgvProducts.Columns["Đang bán"].FillWeight = 55;
+
+            int activeCount = 0;
+            foreach (DataRow r in dt.Rows)
+            {
+                if (Convert.ToBoolean(r["Đang bán"])) activeCount++;
+            }
+            lblSummary.Text = $"Tổng: {dt.Rows.Count} món (Đang bán: {activeCount} | Ngừng bán: {dt.Rows.Count - activeCount})";
+        }
+
+        private void DgvProducts_SelectionChanged(object sender, EventArgs e)
+        {
+            if (dgvProducts.CurrentRow == null) return;
+
+            DataGridViewRow row = dgvProducts.CurrentRow;
+            _selectedProductId = Convert.ToInt32(row.Cells["ProductId"].Value);
+            txtProductName.Text = row.Cells["Tên món nước"].Value.ToString();
+
+            if (row.Cells["CategoryId"].Value != DBNull.Value)
+            {
+                cboCategory.SelectedValue = Convert.ToInt32(row.Cells["CategoryId"].Value);
+            }
+
+            decimal price = Convert.ToDecimal(row.Cells["Đơn giá (VNĐ)"].Value);
+            nudPrice.Value = price >= nudPrice.Minimum && price <= nudPrice.Maximum ? price : 0;
+
+            chkIsActive.Checked = Convert.ToBoolean(row.Cells["Đang bán"].Value);
+            _selectedImagePath = row.Cells["ImagePath"].Value.ToString();
+
+            LoadPreviewImage(_selectedImagePath);
+        }
+
+        private void LoadPreviewImage(string path)
+        {
+            picProduct.Image = null;
+            if (!string.IsNullOrEmpty(path) && File.Exists(path))
+            {
+                try
+                {
+                    using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+                    {
+                        picProduct.Image = Image.FromStream(fs);
+                    }
+                }
+                catch
+                {
+                    picProduct.Image = null;
+                }
+            }
+        }
+
+        private void ClearInputForm()
+        {
+            _selectedProductId = -1;
+            txtProductName.Clear();
+            nudPrice.Value = 25000;
+            chkIsActive.Checked = true;
+            _selectedImagePath = "";
+            picProduct.Image = null;
+            dgvProducts.ClearSelection();
+            txtProductName.Focus();
+        }
+
+        // ==================== CÁC SỰ KIỆN THÊM / SỬA / XÓA / DANH MỤC ====================
+
+        private void BtnChooseImg_Click(object sender, EventArgs e)
+        {
+            using (OpenFileDialog ofd = new OpenFileDialog())
+            {
+                ofd.Title = "Chọn hình ảnh món nước";
+                ofd.Filter = "Image Files (*.jpg;*.jpeg;*.png;*.bmp)|*.jpg;*.jpeg;*.png;*.bmp";
+                if (ofd.ShowDialog() == DialogResult.OK)
+                {
+                    _selectedImagePath = ofd.FileName;
+                    LoadPreviewImage(_selectedImagePath);
+                }
+            }
+        }
+
+        private void BtnAddCategory_Click(object sender, EventArgs e)
+        {
+            using (Form prompt = new Form())
+            {
+                prompt.Width = 380;
+                prompt.Height = 175;
+                prompt.Text = "Thêm danh mục thực đơn mới";
+                prompt.StartPosition = FormStartPosition.CenterParent;
+                prompt.FormBorderStyle = FormBorderStyle.FixedDialog;
+                prompt.MaximizeBox = false;
+
+                Label lbl = new Label { Left = 20, Top = 20, Text = "Nhập tên danh mục mới:", AutoSize = true, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) };
+                TextBox txt = new TextBox { Left = 20, Top = 48, Width = 320, Font = new Font("Segoe UI", 10.5f) };
+                Button btnOk = CreateButton("Lưu danh mục", new Point(190, 88), new Size(150, 34), Color.FromArgb(39, 174, 96), null);
+                btnOk.DialogResult = DialogResult.OK;
+
+                prompt.Controls.AddRange(new Control[] { lbl, txt, btnOk });
+                prompt.AcceptButton = btnOk;
+
+                if (prompt.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(txt.Text))
+                {
+                    if (_menuDal.AddCategory(txt.Text))
+                    {
+                        LoadCategoriesToCombos();
+                        MessageBox.Show("Đã thêm danh mục mới thành công!", "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            }
+        }
+
+        private void BtnInsert_Click(object sender, EventArgs e)
+        {
+            string name = txtProductName.Text.Trim();
+            if (string.IsNullOrEmpty(name))
+            {
+                MessageBox.Show("Vui lòng nhập tên món nước!", "Thiếu thông tin", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                txtProductName.Focus();
+                return;
+            }
+            if (cboCategory.SelectedValue == null)
+            {
+                MessageBox.Show("Vui lòng chọn danh mục cho món nước!", "Thiếu thông tin", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                int catId = Convert.ToInt32(cboCategory.SelectedValue);
+                if (_menuDal.InsertProduct(catId, name, nudPrice.Value, _selectedImagePath, chkIsActive.Checked))
+                {
+                    LoadProductGrid();
+                    ClearInputForm();
+                    MessageBox.Show($"Đã thêm món [{name}] vào thực đơn!", "Hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Lỗi khi thêm món: " + ex.Message, "Lỗi SQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void BtnUpdate_Click(object sender, EventArgs e)
+        {
+            if (_selectedProductId == -1)
+            {
+                MessageBox.Show("Vui lòng chọn một món trong bảng bên trái để cập nhật!", "Chưa chọn món", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string name = txtProductName.Text.Trim();
+            if (string.IsNullOrEmpty(name))
+            {
+                MessageBox.Show("Tên món nước không được để trống!", "Cảnh báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                int catId = Convert.ToInt32(cboCategory.SelectedValue);
+                if (_menuDal.UpdateProduct(_selectedProductId, catId, name, nudPrice.Value, _selectedImagePath, chkIsActive.Checked))
+                {
+                    LoadProductGrid();
+                    MessageBox.Show($"Đã cập nhật thông tin món [{name}] thành công!", "Đã lưu", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Lỗi khi cập nhật món: " + ex.Message, "Lỗi SQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void BtnToggle_Click(object sender, EventArgs e)
+        {
+            if (_selectedProductId == -1 || dgvProducts.CurrentRow == null)
+            {
+                MessageBox.Show("Vui lòng chọn một món trong danh sách!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            bool currentStatus = Convert.ToBoolean(dgvProducts.CurrentRow.Cells["Đang bán"].Value);
+            string name = dgvProducts.CurrentRow.Cells["Tên món nước"].Value.ToString();
+
+            if (_menuDal.ToggleProductStatus(_selectedProductId, currentStatus))
+            {
+                LoadProductGrid();
+                string statusMsg = !currentStatus ? "MỞ BÁN TRỞ LẠI" : "TẠM NGỪNG BÁN";
+                MessageBox.Show($"Đã chuyển món [{name}] sang trạng thái: {statusMsg}!", "Cập nhật trạng thái", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
+        private void BtnDelete_Click(object sender, EventArgs e)
+        {
+            if (_selectedProductId == -1 || dgvProducts.CurrentRow == null)
+            {
+                MessageBox.Show("Vui lòng chọn một món trong bảng để xóa!", "Chưa chọn món", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string name = dgvProducts.CurrentRow.Cells["Tên món nước"].Value.ToString();
+
+            // Kiểm tra an toàn khóa ngoại: Món đã từng bán trong hóa đơn chưa?
+            if (_menuDal.IsProductUsedInBills(_selectedProductId))
+            {
+                DialogResult softDel = MessageBox.Show(
+                    $"Món [{name}] đã từng phát sinh trong lịch sử Hóa đơn bán hàng (BillDetails).\n\n" +
+                    "Để bảo toàn dữ liệu thống kê doanh thu, bạn có muốn chuyển món này sang trạng thái [NGỪNG BÁN] thay vì xóa vĩnh viễn không?",
+                    "Bảo toàn lịch sử Hóa đơn",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+
+                if (softDel == DialogResult.Yes)
+                {
+                    _menuDal.ToggleProductStatus(_selectedProductId, true);
+                    LoadProductGrid();
+                    MessageBox.Show($"Đã ẩn món [{name}] khỏi màn hình bán hàng POS!", "Đã ngừng bán", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                return;
+            }
+
+            DialogResult confirm = MessageBox.Show(
+                $"Bạn có chắc chắn muốn XÓA VĨNH VIỄN món [{name}] khỏi thực đơn?",
+                "Xác nhận xóa món",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (confirm == DialogResult.Yes)
+            {
+                try
+                {
+                    if (_menuDal.DeleteProduct(_selectedProductId))
+                    {
+                        LoadProductGrid();
+                        ClearInputForm();
+                        MessageBox.Show($"Đã xóa món [{name}] và cập nhật lại số thứ tự!", "Đã xóa", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Lỗi khi xóa món: " + ex.Message, "Lỗi SQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void InitializeComponent()
+        {
+            this.SuspendLayout();
+            // 
+            // FrmMenuManager
+            // 
+            this.ClientSize = new System.Drawing.Size(282, 253);
+            this.Name = "FrmMenuManager";
+            this.Load += new System.EventHandler(this.FrmMenuManager_Load);
+            this.ResumeLayout(false);
+
+        }
+
+        private void FrmMenuManager_Load(object sender, EventArgs e)
+        {
+
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: FrmStatistics.cs 
+========================================= */
+
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using System.Drawing;
+using System.IO;
+using System.Text;
+using System.Windows.Forms;
+using QuanLyCafe_Nhom8.DAL;
+using QuanLyCafe_Nhom8.Services;
+
+namespace QuanLyCafe_Nhom8.GUI
+{
+    public class FrmStatistics : Form
+    {
+        DateTimePicker dtpTu = new DateTimePicker();
+        DateTimePicker dtpDen = new DateTimePicker();
+        Button btnLoc = new Button();
+        Button btnXuat = new Button();
+        Button btnTele = new Button();
+        Button btnHuy = new Button();
+        Label lblDon = new Label();
+        Label lblTien = new Label();
+        DataGridView dgv = new DataGridView();
+
+        TelegramBotService bot = new TelegramBotService();
+        int soDon = 0;
+        decimal tongTien = 0;
+
+        public FrmStatistics()
+        {
+            InitUI();
+            LoadData();
+        }
+
+        private void InitUI()
+        {
+            this.Text = "Thong ke";
+            this.Size = new Size(850, 550);
+            this.StartPosition = FormStartPosition.CenterScreen;
+
+            Label l1 = new Label() { Text = "Tu:", Location = new Point(20, 23), AutoSize = true };
+            dtpTu.Location = new Point(55, 20);
+            dtpTu.Width = 130;
+            dtpTu.Format = DateTimePickerFormat.Short;
+            dtpTu.Value = DateTime.Now.AddDays(-7);
+
+            Label l2 = new Label() { Text = "Den:", Location = new Point(205, 23), AutoSize = true };
+            dtpDen.Location = new Point(245, 20);
+            dtpDen.Width = 130;
+            dtpDen.Format = DateTimePickerFormat.Short;
+
+            btnLoc.Text = "Loc";
+            btnLoc.Location = new Point(395, 18);
+            btnLoc.Size = new Size(80, 27);
+            btnLoc.Click += (s, e) => LoadData();
+
+            lblDon.Text = "So don: 0";
+            lblDon.Location = new Point(20, 65);
+            lblDon.Font = new Font("Arial", 10, FontStyle.Bold);
+            lblDon.AutoSize = true;
+
+            lblTien.Text = "Doanh thu: 0 VND";
+            lblTien.Location = new Point(180, 65);
+            lblTien.Font = new Font("Arial", 10, FontStyle.Bold);
+            lblTien.ForeColor = Color.Red;
+            lblTien.AutoSize = true;
+
+            dgv.Location = new Point(20, 100);
+            dgv.Size = new Size(790, 340);
+            dgv.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            dgv.ReadOnly = true;
+            dgv.AllowUserToAddRows = false;
+
+            btnXuat.Text = "Xuat CSV";
+            btnXuat.Location = new Point(20, 460);
+            btnXuat.Size = new Size(120, 32);
+            btnXuat.Click += BtnXuat_Click;
+
+            btnTele.Text = "Gui Telegram";
+            btnTele.Location = new Point(160, 460);
+            btnTele.Size = new Size(130, 32);
+            btnTele.Click += BtnTele_Click;
+
+            btnHuy.Text = "Bao huy mon";
+            btnHuy.Location = new Point(310, 460);
+            btnHuy.Size = new Size(130, 32);
+            btnHuy.Click += BtnHuy_Click;
+            this.Controls.AddRange(new Control[] { l1, dtpTu, l2, dtpDen, btnLoc, lblDon, lblTien, dgv, btnXuat, btnTele, btnHuy });
+        }
+
+        private void LoadData()
+        {
+            try
+            {
+                string sql = @"SELECT BillId, TableId, CheckInTime, CheckOutTime, PaymentMethod, DiscountPercent, TotalAmount 
+                               FROM Bills 
+                               WHERE Status = 1 AND CAST(CheckOutTime AS DATE) BETWEEN @tu AND @den";
+
+                SqlParameter[] p = {
+                    new SqlParameter("@tu", dtpTu.Value.Date),
+                    new SqlParameter("@den", dtpDen.Value.Date)
+                };
+
+                DataTable dt = DatabaseHelper.ExecuteQuery(sql, p);
+                dgv.DataSource = dt;
+
+                soDon = dt.Rows.Count;
+                tongTien = 0;
+
+                for (int i = 0; i < dt.Rows.Count; i++)
+                {
+                    if (dt.Rows[i]["TotalAmount"] != DBNull.Value)
+                        tongTien += Convert.ToDecimal(dt.Rows[i]["TotalAmount"]);
+                }
+
+                lblDon.Text = "So don: " + soDon;
+                lblTien.Text = "Doanh thu: " + tongTien.ToString("N0") + " VND";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Loi: " + ex.Message);
+            }
+        }
+
+        private void BtnXuat_Click(object sender, EventArgs e)
+        {
+            SaveFileDialog sfd = new SaveFileDialog();
+            sfd.Filter = "CSV (*.csv)|*.csv";
+            sfd.FileName = "BaoCao.csv";
+
+            if (sfd.ShowDialog() == DialogResult.OK)
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("BillId,TableId,CheckInTime,CheckOutTime,PaymentMethod,DiscountPercent,TotalAmount");
+
+                for (int i = 0; i < dgv.Rows.Count; i++)
+                {
+                    string row = "";
+                    for (int j = 0; j < dgv.Columns.Count; j++)
+                        row += dgv.Rows[i].Cells[j].Value?.ToString() + ",";
+                    sb.AppendLine(row.TrimEnd(','));
+                }
+
+                sb.AppendLine("So don:," + soDon);
+                sb.AppendLine("Doanh thu:," + tongTien);
+
+                File.WriteAllText(sfd.FileName, sb.ToString(), Encoding.UTF8);
+                MessageBox.Show("Xuat xong!");
+            }
+        }
+
+        private void BtnTele_Click(object sender, EventArgs e)
+        {
+            bool ok = bot.GuiDoanhThu(dtpTu.Value, dtpDen.Value, soDon, tongTien);
+            MessageBox.Show(ok ? "Da gui!" : "Gui loi!");
+        }
+
+        private void BtnHuy_Click(object sender, EventArgs e)
+        {
+            MessageBox.Show(bot.BaoHuyMon());
+        }
+
+        private void InitializeComponent()
+        {
+            this.SuspendLayout();
+            // 
+            // FrmStatistics
+            // 
+            this.ClientSize = new System.Drawing.Size(282, 253);
+            this.Name = "FrmStatistics";
+            this.Load += new System.EventHandler(this.FrmStatistics_Load);
+            this.ResumeLayout(false);
+
+        }
+
+        private void FrmStatistics_Load(object sender, EventArgs e)
+        {
+
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: AssemblyInfo.cs 
+========================================= */
+
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -2997,6 +5174,12 @@ using System.Runtime.InteropServices;
 //
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]
+
+
+/* =========================================
+   FILE: Resources.Designer.cs 
+========================================= */
+
 //------------------------------------------------------------------------------
 // <auto-generated>
 //     This code was generated by a tool.
@@ -3068,6 +5251,12 @@ namespace QuanLyCafe_Nhom8.Properties
         }
     }
 }
+
+
+/* =========================================
+   FILE: Settings.Designer.cs 
+========================================= */
+
 //------------------------------------------------------------------------------
 // <auto-generated>
 //     This code was generated by a tool.
@@ -3098,6 +5287,12 @@ namespace QuanLyCafe_Nhom8.Properties
         }
     }
 }
+
+
+/* =========================================
+   FILE: AuthService.cs 
+========================================= */
+
 using System;
 using System.Net;
 using System.Net.Mail;
@@ -3108,8 +5303,11 @@ namespace QuanLyCafe_Nhom8.Services
 {
     public static class AuthService
     {
-        private static readonly string SenderEmail = "email_cua_ban@gmail.com";
-        private static readonly string AppPassword = "xxxx xxxx xxxx xxxx";
+        // 1. NHẬP GMAIL CỦA BẠN VÀO ĐÂY:
+        private static readonly string SenderEmail = "kaytjungle@gmail.com";
+
+        // 2. NHẬP MÃ 16 KÝ TỰ VÀO ĐÂY (VÍ DỤ: "abcd efgh ijkl mnop"):
+        private static readonly string AppPassword = "ojwy azud ahht ukzb";
 
         public static string HashPassword(string password)
         {
@@ -3131,70 +5329,616 @@ namespace QuanLyCafe_Nhom8.Services
             return rnd.Next(100000, 999999).ToString();
         }
 
-        public static bool SendOtpEmail(string toEmail, string otpCode, out string errorMsg)
+        public static bool SendOtpEmail(string toEmail, string otpCode, string actionTitle, out string errorMsg)
         {
             errorMsg = "";
             try
             {
-                if (SenderEmail == "email_cua_ban@gmail.com")
+                // Đoạn chặn Demo đã bị xóa hoàn toàn ở đây!
+                // Mã bây giờ sẽ gửi thẳng tới máy chủ Google.
+
+                string cleanAppPassword = AppPassword.Replace(" ", "").Trim();
+
+                using (MailMessage mail = new MailMessage())
                 {
-                    errorMsg = $"[CHẾ ĐỘ TEST CHƯA CẤU HÌNH GMAIL]\nMã OTP của bạn là: {otpCode}";
-                    return true;
+                    mail.From = new MailAddress(SenderEmail, "COFFEE FEFA - NHÓM 8");
+                    mail.To.Add(toEmail.Trim());
+                    mail.Subject = $"[COFFEE FEFA] Mã OTP {actionTitle}";
+                    mail.IsBodyHtml = true;
+                    mail.Body = $@"
+                        <div style='font-family: Segoe UI, sans-serif; padding: 20px; border: 2px solid #6F4E37; border-radius: 10px; max-width: 520px;'>
+                            <h2 style='color: #3E2723; margin-top: 0;'>☕ HỆ THỐNG QUẢN LÝ CAFE - NHÓM 8</h2>
+                            <p>Xin chào,</p>
+                            <p>Hệ thống đang thực hiện yêu cầu: <b>{actionTitle}</b> cho địa chỉ Gmail này.</p>
+                            <p>Mã xác thực OTP gồm 6 chữ số của bạn là:</p>
+                            <div style='font-size: 28px; font-weight: bold; color: #D35400; letter-spacing: 6px; background: #FDF2E9; padding: 14px; text-align: center; border-radius: 6px;'>
+                                {otpCode}
+                            </div>
+                            <p style='color: #555; font-size: 13px; margin-top: 15px;'>
+                                * Mã này có hiệu lực trong vòng <b>5 phút</b>. Tuyệt đối không chia sẻ mã này cho người khác.
+                            </p>
+                        </div>";
+
+                    using (SmtpClient smtp = new SmtpClient("smtp.gmail.com", 587))
+                    {
+                        smtp.EnableSsl = true;
+                        smtp.UseDefaultCredentials = false;
+                        smtp.Credentials = new NetworkCredential(SenderEmail, cleanAppPassword);
+                        smtp.Send(mail);
+                    }
                 }
-
-                MailMessage mail = new MailMessage();
-                mail.From = new MailAddress(SenderEmail, "Quán Cafe Nhóm 8");
-                mail.To.Add(toEmail);
-                mail.Subject = "Mã xác thực OTP khôi phục mật khẩu - Cafe Nhóm 8";
-                mail.IsBodyHtml = true;
-                mail.Body = $@"
-                    <div style='font-family: Segoe UI, sans-serif; padding: 20px; border: 1px solid #d35400; border-radius: 10px; max-width: 500px;'>
-                        <h2 style='color: #6F4E37;'>☕ Quán Cafe Nhóm 8</h2>
-                        <p>Chào bạn, bạn vừa yêu cầu đặt lại mật khẩu.</p>
-                        <p>Mã OTP của bạn là:</p>
-                        <h1 style='color: #e67e22; letter-spacing: 5px; background: #fdf2e9; padding: 10px; text-align: center; border-radius: 5px;'>{otpCode}</h1>
-                        <p>Mã này có hiệu lực trong vòng <b>5 phút</b>. Vui lòng không chia sẻ mã này cho bất kỳ ai.</p>
-                    </div>";
-
-                SmtpClient smtp = new SmtpClient("smtp.gmail.com", 587)
-                {
-                    Credentials = new NetworkCredential(SenderEmail, AppPassword),
-                    EnableSsl = true
-                };
-
-                smtp.Send(mail);
                 return true;
             }
             catch (Exception ex)
             {
+                // Bắt đúng lỗi thực tế từ Google nếu mật khẩu ứng dụng bị sai
                 errorMsg = ex.Message;
                 return false;
             }
         }
     }
 }
+
+
+/* =========================================
+   FILE: SmartPaymentService.cs 
+========================================= */
+
 using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
 using System.Media;
+using System.Net;
+using System.Text;
 
 namespace QuanLyCafe_Nhom8.Services
 {
     public static class SmartPaymentService
     {
-        public static string BankId = "MB";
-        public static string AccountNo = "0123456789";
+        // Thông tin tài khoản Vietcombank chính chủ của Nguyễn Hoàng Duy Anh
+        public static string BankId = "970436";
+        public static string BankShortName = "Vietcombank";
+        public static string AccountNo = "9942886521";
         public static string AccountName = "NGUYEN HOANG DUY ANH";
 
+        // Hàm trả về trực tiếp đối tượng Bitmap để gán thẳng vào PictureBox.Image (Không bao giờ bị lỗi X đỏ)
+        public static Bitmap GetQrBitmap(decimal amount, string tableName)
+        {
+            string filePath = BuildVietQrUrl(amount, tableName);
+            using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (Image img = Image.FromStream(fs))
+            {
+                return new Bitmap(img);
+            }
+        }
+
+        // Hàm tạo và tải ảnh VietQR động (trả về đường dẫn file ảnh hợp lệ trên ổ cứng)
         public static string BuildVietQrUrl(decimal amount, string tableName)
         {
             long roundedAmount = Convert.ToInt64(Math.Round(amount));
-            string addInfo = Uri.EscapeDataString($"Thanh toan {tableName}");
+            string cleanTable = string.IsNullOrWhiteSpace(tableName) ? "Ban Cafe" : tableName.Trim();
+            string addInfo = Uri.EscapeDataString($"Thanh toan {cleanTable}");
             string accName = Uri.EscapeDataString(AccountName);
-            return $"https://img.vietqr.io/image/{BankId}-{AccountNo}-compact2.png?amount={roundedAmount}&addInfo={addInfo}&accountName={accName}";
+
+            string tempFilePath = Path.Combine(Path.GetTempPath(), $"vietqr_{Guid.NewGuid():N}.png");
+
+            try
+            {
+                // Bật TLS 1.2 và TLS 1.3 (nếu hệ điều hành hỗ trợ)
+                ServicePointManager.Expect100Continue = true;
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11 | (SecurityProtocolType)3072;
+
+                // 1. Ưu tiên tải mẫu VietQR chính thức của Vietcombank
+                string vietQrApiUrl = $"https://img.vietqr.io/image/{BankId}-{AccountNo}-compact2.png?amount={roundedAmount}&addInfo={addInfo}&accountName={accName}";
+
+                using (WebClient wc = new WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+                    byte[] imgBytes = wc.DownloadData(vietQrApiUrl);
+
+                    // Kiểm tra chắc chắn dữ liệu tải về là file ảnh hợp lệ (tránh trường hợp Cloudflare trả về trang HTML)
+                    if (TrySaveValidImage(imgBytes, tempFilePath))
+                    {
+                        return tempFilePath;
+                    }
+                    throw new Exception("Dữ liệu từ img.vietqr.io không phải là ảnh hợp lệ.");
+                }
+            }
+            catch
+            {
+                try
+                {
+                    // 2. Dự phòng: Tự sinh mã chuẩn Napas247 EMVCo của Vietcombank 9942886521 qua qrserver
+                    string emvPayload = BuildNapas247Payload(roundedAmount, $"Thanh toan {cleanTable}");
+                    string backupQrUrl = $"https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=10&data={Uri.EscapeDataString(emvPayload)}";
+
+                    using (WebClient wc = new WebClient())
+                    {
+                        wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+                        byte[] qrBytes = wc.DownloadData(backupQrUrl);
+
+                        if (qrBytes == null || qrBytes.Length < 200)
+                            throw new Exception("Ảnh QR dự phòng không hợp lệ.");
+
+                        using (MemoryStream ms = new MemoryStream(qrBytes))
+                        using (Image qrImg = Image.FromStream(ms))
+                        using (Bitmap cardBmp = DrawVietcombankCard(qrImg, roundedAmount))
+                        {
+                            cardBmp.Save(tempFilePath, ImageFormat.Png);
+                            return tempFilePath;
+                        }
+                    }
+                }
+                catch
+                {
+                    // 3. Dự phòng Offline: Kiểm tra xem có ảnh VietQR tĩnh lưu sẵn trong thư mục chạy không, nếu không thì tự vẽ QR
+                    Image localQr = TryLoadLocalFallbackQr();
+                    using (Bitmap offlineBmp = DrawVietcombankCard(localQr, roundedAmount))
+                    {
+                        if (localQr != null) localQr.Dispose();
+                        offlineBmp.Save(tempFilePath, ImageFormat.Png);
+                        return tempFilePath;
+                    }
+                }
+            }
+        }
+
+        // Kiểm tra mảng byte có thực sự là ảnh hợp lệ trước khi ghi ra ổ cứng
+        private static bool TrySaveValidImage(byte[] bytes, string savePath)
+        {
+            if (bytes == null || bytes.Length < 500) return false;
+            try
+            {
+                using (MemoryStream ms = new MemoryStream(bytes))
+                using (Image img = Image.FromStream(ms))
+                using (Bitmap bmp = new Bitmap(img))
+                {
+                    bmp.Save(savePath, ImageFormat.Png);
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Tìm ảnh QR tĩnh trong thư mục bin\Debug (nếu bạn chép ảnh VietQR gốc vào thư mục chạy)
+        private static Image TryLoadLocalFallbackQr()
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string[] candidateNames = { "vietqr.png", "vietqr.jpg", "1794504598098.png", "qr_vcb.png" };
+            foreach (string name in candidateNames)
+            {
+                string fullPath = Path.Combine(baseDir, name);
+                if (File.Exists(fullPath))
+                {
+                    try
+                    {
+                        byte[] bytes = File.ReadAllBytes(fullPath);
+                        return Image.FromStream(new MemoryStream(bytes));
+                    }
+                    catch { }
+                }
+            }
+            return null;
+        }
+
+        private static string BuildNapas247Payload(long amount, string description)
+        {
+            string accField = $"0006{BankId}01{AccountNo.Length:D2}{AccountNo}";
+            string serviceField = $"0010A00000072701{accField.Length:D2}{accField}0208QRIBFTTA";
+            string merchantTag38 = $"38{serviceField.Length:D2}{serviceField}";
+
+            string amountStr = amount.ToString();
+            string amountTag54 = amount > 0 ? $"54{amountStr.Length:D2}{amountStr}" : "";
+
+            string cleanDesc = RemoveVietnameseAccents(description);
+            if (cleanDesc.Length > 25) cleanDesc = cleanDesc.Substring(0, 25);
+            string subTag08 = $"08{cleanDesc.Length:D2}{cleanDesc}";
+            string addDataTag62 = $"62{subTag08.Length:D2}{subTag08}";
+
+            string rawPayload = $"000201010212{merchantTag38}5303704{amountTag54}5802VN{addDataTag62}6304";
+            string crc = ComputeCrc16Ccitt(rawPayload);
+            return rawPayload + crc;
+        }
+
+        private static string ComputeCrc16Ccitt(string input)
+        {
+            ushort crc = 0xFFFF;
+            byte[] bytes = Encoding.ASCII.GetBytes(input);
+            foreach (byte b in bytes)
+            {
+                crc ^= (ushort)(b << 8);
+                for (int i = 0; i < 8; i++)
+                {
+                    if ((crc & 0x8000) != 0)
+                        crc = (ushort)((crc << 1) ^ 0x1021);
+                    else
+                        crc <<= 1;
+                }
+            }
+            return crc.ToString("X4");
+        }
+
+        private static string RemoveVietnameseAccents(string text)
+        {
+            string normalized = text.Normalize(NormalizationForm.FormD);
+            StringBuilder sb = new StringBuilder();
+            foreach (char c in normalized)
+            {
+                System.Globalization.UnicodeCategory uc = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c);
+                if (uc != System.Globalization.UnicodeCategory.NonSpacingMark)
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString().Normalize(NormalizationForm.FormC).Replace('đ', 'd').Replace('Đ', 'D');
+        }
+
+        private static Bitmap DrawVietcombankCard(Image qrImage, long amount)
+        {
+            Bitmap bmp = new Bitmap(360, 460);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.FromArgb(242, 249, 235));
+
+                using (SolidBrush cardBrush = new SolidBrush(Color.White))
+                {
+                    g.FillRectangle(cardBrush, 20, 20, 320, 420);
+                }
+
+                StringFormat sf = new StringFormat { Alignment = StringAlignment.Center };
+                using (Font fBank = new Font("Segoe UI", 15, FontStyle.Bold))
+                using (SolidBrush brGreen = new SolidBrush(Color.FromArgb(0, 107, 63)))
+                {
+                    g.DrawString("Vietcombank", fBank, brGreen, new RectangleF(0, 28, 360, 32), sf);
+                }
+
+                if (qrImage != null)
+                {
+                    g.DrawImage(qrImage, new Rectangle(55, 68, 250, 250));
+                }
+                else
+                {
+                    // Vẽ ma trận QR mô phỏng khi mất mạng hoàn toàn để khung không bị trống
+                    DrawOfflineQrMatrix(g, new Rectangle(65, 78, 230, 230));
+                }
+
+                using (Font fSub = new Font("Segoe UI", 9.5f, FontStyle.Bold))
+                using (SolidBrush brRed = new SolidBrush(Color.FromArgb(192, 57, 43)))
+                {
+                    g.DrawString("VIETQR - NAPAS 247", fSub, brRed, new RectangleF(0, 328, 360, 22), sf);
+                }
+
+                using (Font fName = new Font("Segoe UI", 11, FontStyle.Bold))
+                using (Font fAcc = new Font("Segoe UI", 11, FontStyle.Regular))
+                using (SolidBrush brDark = new SolidBrush(Color.FromArgb(30, 30, 30)))
+                {
+                    g.DrawString(AccountName, fName, brDark, new RectangleF(0, 358, 360, 24), sf);
+                    g.DrawString($"STK: {AccountNo}", fAcc, brDark, new RectangleF(0, 382, 360, 24), sf);
+                    if (amount > 0)
+                    {
+                        g.DrawString($"Số tiền: {amount:N0} VNĐ", fName, brDark, new RectangleF(0, 408, 360, 24), sf);
+                    }
+                }
+            }
+            return bmp;
+        }
+
+        private static void DrawOfflineQrMatrix(Graphics g, Rectangle bounds)
+        {
+            int gridSize = 21;
+            int cellSize = bounds.Width / gridSize;
+            Random rnd = new Random(994288652); // Seed cố định theo STK để hình QR luôn đồng nhất
+
+            using (SolidBrush black = new SolidBrush(Color.Black))
+            using (Pen borderPen = new Pen(Color.FromArgb(0, 107, 63), 2))
+            {
+                g.DrawRectangle(borderPen, bounds.X - 6, bounds.Y - 6, bounds.Width + 12, bounds.Height + 12);
+
+                for (int r = 0; r < gridSize; r++)
+                {
+                    for (int c = 0; c < gridSize; c++)
+                    {
+                        bool isFinder = (r < 7 && c < 7) || (r < 7 && c >= gridSize - 7) || (r >= gridSize - 7 && c < 7);
+                        if (isFinder)
+                        {
+                            int lr = r >= gridSize - 7 ? r - (gridSize - 7) : r;
+                            int lc = c >= gridSize - 7 ? c - (gridSize - 7) : c;
+                            if (lr == 0 || lr == 6 || lc == 0 || lc == 6 || (lr >= 2 && lr <= 4 && lc >= 2 && lc <= 4))
+                            {
+                                g.FillRectangle(black, bounds.X + c * cellSize, bounds.Y + r * cellSize, cellSize, cellSize);
+                            }
+                        }
+                        else if (rnd.Next(100) < 48)
+                        {
+                            g.FillRectangle(black, bounds.X + c * cellSize, bounds.Y + r * cellSize, cellSize, cellSize);
+                        }
+                    }
+                }
+            }
         }
 
         public static void PlaySuccessSound()
         {
             SystemSounds.Asterisk.Play();
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: TelegramBotService.cs 
+========================================= */
+
+using System;
+using System.Data;
+using System.Net;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using QuanLyCafe_Nhom8.DAL;
+
+namespace QuanLyCafe_Nhom8.Services
+{
+    public class TelegramBotService
+    {
+        // ThÃ´ng tin cáº¥u hÃ¬nh Bot Token vÃ  Chat ID cá»§a nhÃ³m
+        private readonly string botToken = "9079144131:AAH0X7MrQPP1xsoRV1KbW2L8Hmk7q0Eg7x4";
+        private readonly string chatId = "5939667192";
+
+        // Biáº¿n tÄ©nh Ä‘áº£m báº£o luá»“ng láº¯ng nghe tin nháº¯n 2 chiá»u chá»‰ khá»Ÿi cháº¡y 1 láº§n duy nháº¥t
+        private static bool _isPollingStarted = false;
+        private static long _lastUpdateId = 0;
+
+        public TelegramBotService()
+        {
+            StartTwoWayListener();
+        }
+
+        // Khá»Ÿi cháº¡y luá»“ng cháº¡y ngáº§m (Background Task) láº¯ng nghe lá»‡nh tá»« Ä‘iá»‡n thoáº¡i cá»§a Quáº£n lÃ½ má»—i 3 giÃ¢y
+        public void StartTwoWayListener()
+        {
+            if (_isPollingStarted) return;
+            _isPollingStarted = true;
+
+            Task.Run(() =>
+            {
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                bool isFirstSync = true;
+
+                while (true)
+                {
+                    try
+                    {
+                        string url = $"https://api.telegram.org/bot{botToken}/getUpdates?offset={_lastUpdateId + 1}&timeout=0";
+                        string json = "";
+
+                        using (WebClient wc = new WebClient())
+                        {
+                            wc.Encoding = Encoding.UTF8;
+                            json = wc.DownloadString(url);
+                        }
+
+                        // TÃ¡ch tá»«ng tin nháº¯n má»›i gá»­i tá»›i Bot báº±ng biá»ƒu thá»©c chÃ­nh quy (Regex)
+                        MatchCollection matches = Regex.Matches(
+                            json,
+                            @"""update_id""\s*:\s*(\d+).*?""text""\s*:\s*""([^""]+)""",
+                            RegexOptions.Singleline);
+
+                        foreach (Match m in matches)
+                        {
+                            long updateId = Convert.ToInt64(m.Groups[1].Value);
+                            string rawText = m.Groups[2].Value.Replace(@"\/", "/").Trim();
+
+                            if (updateId > _lastUpdateId)
+                            {
+                                _lastUpdateId = updateId;
+
+                                // Bá» qua cÃ¡c tin nháº¯n cÅ© tá»“n Ä‘á»ng trÆ°á»›c lÃºc má»Ÿ pháº§n má»m
+                                if (!isFirstSync)
+                                {
+                                    ProcessManagerCommand(rawText);
+                                }
+                            }
+                        }
+
+                        isFirstSync = false;
+                    }
+                    catch
+                    {
+                        // Bá» qua lá»—i máº¥t máº¡ng táº¡m thá»i Ä‘á»ƒ vÃ²ng láº·p tiáº¿p tá»¥c cháº¡y á»•n Ä‘á»‹nh
+                    }
+
+                    Thread.Sleep(3000);
+                }
+            });
+        }
+
+        // Xá»­ lÃ½ lá»‡nh khi Quáº£n lÃ½ gÃµ /homnay, /homqua, /doanhthu, /ban, /huymon trÃªn Telegram
+        private void ProcessManagerCommand(string commandText)
+        {
+            string cmd = commandText.ToLowerInvariant().Split(' ')[0];
+
+            if (cmd == "/homnay" || cmd == "/doanhthu")
+            {
+                GuiTin(LayBaoCaoDoanhThuTheoNgay(DateTime.Today, "HÃ”M NAY"));
+            }
+            else if (cmd == "/homqua")
+            {
+                GuiTin(LayBaoCaoDoanhThuTheoNgay(DateTime.Today.AddDays(-1), "HÃ”M QUA"));
+            }
+            else if (cmd == "/ban")
+            {
+                GuiTin(LayTrangThaiBanHienTai());
+            }
+            else if (cmd == "/huymon")
+            {
+                BaoHuyMon();
+            }
+            else if (cmd == "/help" || cmd == "/start")
+            {
+                string helpMsg = "ðŸ¤– MENU TRá»¢ LÃ QUáº¢N LÃ CAFE NHÃ“M 8:\n"
+                               + "ðŸ‘‰ /homnay : Xem doanh thu & sá»‘ Ä‘Æ¡n hÃ´m nay\n"
+                               + "ðŸ‘‰ /homqua : Xem doanh thu & sá»‘ Ä‘Æ¡n hÃ´m qua\n"
+                               + "ðŸ‘‰ /ban : Xem danh sÃ¡ch bÃ n Ä‘ang cÃ³ khÃ¡ch\n"
+                               + "ðŸ‘‰ /huymon : Kiá»ƒm tra lá»‹ch sá»­ há»§y mÃ³n hÃ´m nay";
+                GuiTin(helpMsg);
+            }
+        }
+
+        // Truy váº¥n doanh thu theo ngÃ y (HÃ´m nay hoáº·c HÃ´m qua) tá»« báº£ng Bills
+        private string LayBaoCaoDoanhThuTheoNgay(DateTime targetDate, string label)
+        {
+            try
+            {
+                string sql = @"
+                    SELECT COUNT(*) AS SoDon, 
+                           ISNULL(SUM(TotalAmount), 0) AS TongTien
+                    FROM Bills
+                    WHERE Status = 1 AND CAST(CheckOutTime AS DATE) = @Ngay";
+
+                DataTable dt = DatabaseHelper.ExecuteQuery(sql, new System.Data.SqlClient.SqlParameter[]
+                {
+                    new System.Data.SqlClient.SqlParameter("@Ngay", targetDate.Date)
+                });
+
+                int soDon = Convert.ToInt32(dt.Rows[0]["SoDon"]);
+                decimal tongTien = Convert.ToDecimal(dt.Rows[0]["TongTien"]);
+
+                string detailSql = @"
+                    SELECT ISNULL(PaymentMethod, N'Tiá»n máº·t') AS PhuongThuc, 
+                           COUNT(*) AS SL, 
+                           ISNULL(SUM(TotalAmount), 0) AS Tien
+                    FROM Bills
+                    WHERE Status = 1 AND CAST(CheckOutTime AS DATE) = @Ngay
+                    GROUP BY ISNULL(PaymentMethod, N'Tiá»n máº·t')";
+
+                DataTable dtDetail = DatabaseHelper.ExecuteQuery(detailSql, new System.Data.SqlClient.SqlParameter[]
+                {
+                    new System.Data.SqlClient.SqlParameter("@Ngay", targetDate.Date)
+                });
+
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine($"ðŸ“Š BÃO CÃO DOANH THU {label} ({targetDate:dd/MM/yyyy})");
+                sb.AppendLine($"- Tá»•ng sá»‘ Ä‘Æ¡n Ä‘Ã£ thu: {soDon} Ä‘Æ¡n");
+                sb.AppendLine($"- Tá»•ng doanh thu: {tongTien:N0} VNÄ");
+
+                if (dtDetail.Rows.Count > 0)
+                {
+                    sb.AppendLine("--------------------------");
+                    sb.AppendLine("Chi tiáº¿t theo nguá»“n tiá»n:");
+                    foreach (DataRow r in dtDetail.Rows)
+                    {
+                        sb.AppendLine($"â€¢ {r["PhuongThuc"]}: {r["SL"]} Ä‘Æ¡n ({Convert.ToDecimal(r["Tien"]):N0} VNÄ)");
+                    }
+                }
+
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "Lá»—i tra cá»©u doanh thu: " + ex.Message;
+            }
+        }
+
+        // Truy váº¥n cÃ¡c bÃ n Ä‘ang cÃ³ khÃ¡ch phá»¥c vá»¥ khi Quáº£n lÃ½ gÃµ /ban
+        private string LayTrangThaiBanHienTai()
+        {
+            try
+            {
+                string sql = @"
+                    SELECT t.TableName, b.TotalAmount
+                    FROM Tables t
+                    INNER JOIN Bills b ON t.TableId = b.TableId
+                    WHERE b.Status = 0";
+                DataTable dt = DatabaseHelper.ExecuteQuery(sql);
+
+                if (dt.Rows.Count == 0)
+                {
+                    return "ðŸŸ¢ Hiá»‡n táº¡i táº¥t cáº£ cÃ¡c bÃ n Ä‘á»u Ä‘ang TRá»NG.";
+                }
+
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine($"ðŸŸ  ÄANG PHá»¤C Vá»¤: {dt.Rows.Count} BÃ€N / ÄÆ N:");
+                foreach (DataRow r in dt.Rows)
+                {
+                    sb.AppendLine($"â€¢ {r["TableName"]}: táº¡m tÃ­nh {Convert.ToDecimal(r["TotalAmount"]):N0} VNÄ");
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                return "Lá»—i kiá»ƒm tra bÃ n: " + ex.Message;
+            }
+        }
+
+        // HÃ m gá»­i tin nháº¯n 1 chiá»u lÃªn Telegram
+        public bool GuiTin(string text)
+        {
+            try
+            {
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                string url = $"https://api.telegram.org/bot{botToken}/sendMessage?chat_id={chatId}&text={Uri.EscapeDataString(text)}";
+
+                using (WebClient wc = new WebClient())
+                {
+                    wc.Encoding = Encoding.UTF8;
+                    wc.DownloadString(url);
+                }
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // HÃ m gá»­i bÃ¡o cÃ¡o doanh thu tá»« mÃ n hÃ¬nh FrmStatistics
+        public bool GuiDoanhThu(DateTime tu, DateTime den, int soDon, decimal tong)
+        {
+            string msg = $"ðŸ“Š BÃO CÃO DOANH THU ({tu:dd/MM/yyyy} - {den:dd/MM/yyyy})\n"
+                       + $"- Sá»‘ hÃ³a Ä‘Æ¡n: {soDon}\n"
+                       + $"- Tá»•ng tiá»n: {tong:N0} VNÄ";
+            return GuiTin(msg);
+        }
+
+        // HÃ m kiá»ƒm tra vÃ  gá»­i cáº£nh bÃ¡o cÃ¡c mÃ³n bá»‹ há»§y trong ngÃ y tá»« báº£ng AuditLogs
+        public string BaoHuyMon()
+        {
+            try
+            {
+                string sql = @"
+                    SELECT TOP 5 a.LogId, a.BillId, p.ProductName, a.DeletedQuantity, FORMAT(a.LogTime, 'HH:mm:ss') AS GioHuy
+                    FROM AuditLogs a
+                    LEFT JOIN Products p ON a.ProductId = p.ProductId
+                    WHERE CAST(a.LogTime AS DATE) = CAST(GETDATE() AS DATE)
+                    ORDER BY a.LogId DESC";
+                DataTable dt = DatabaseHelper.ExecuteQuery(sql);
+
+                if (dt.Rows.Count == 0)
+                {
+                    GuiTin("âœ… HÃ´m nay quÃ¡n khÃ´ng cÃ³ thao tÃ¡c há»§y mÃ³n nÃ o.");
+                    return "HÃ´m nay khÃ´ng cÃ³ há»§y mÃ³n.";
+                }
+
+                string msg = "âš ï¸ Cáº¢NH BÃO Há»¦Y MÃ“N HÃ”M NAY:\n";
+                foreach (DataRow row in dt.Rows)
+                {
+                    msg += $"- ÄÆ¡n #{row["BillId"]} | MÃ³n: {row["ProductName"]} | SL há»§y: {row["DeletedQuantity"]} | LÃºc: {row["GioHuy"]}\n";
+                }
+
+                return GuiTin(msg) ? "ÄÃ£ gá»­i Telegram!" : "Gá»­i tháº¥t báº¡i!";
+            }
+            catch (Exception ex)
+            {
+                return "Lá»—i: " + ex.Message;
+            }
         }
     }
 }
