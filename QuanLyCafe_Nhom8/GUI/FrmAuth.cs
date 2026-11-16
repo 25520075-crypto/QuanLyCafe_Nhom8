@@ -1549,7 +1549,7 @@ namespace QuanLyCafe_Nhom8.GUI
             // 
             // FrmAuth
             // 
-            this.ClientSize = new System.Drawing.Size(282, 253);
+            this.ClientSize = new System.Drawing.Size(759, 412);
             this.Name = "FrmAuth";
             this.Load += new System.EventHandler(this.FrmAuth_Load);
             this.ResumeLayout(false);
