@@ -84,6 +84,7 @@
     <Compile Include="GUI\FrmStatistics.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Network\CafeNetworkClient.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Services\AuthService.cs" />
@@ -129,6 +130,12 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="Database\script.sql" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Protocol\Protocol.csproj">
+      <Project>{64611ee6-e755-437f-975e-53c462f0ff65}</Project>
+      <Name>Protocol</Name>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
