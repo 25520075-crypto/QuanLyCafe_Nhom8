@@ -478,11 +478,20 @@ namespace QuanLyCafe_Nhom8.GUI
 
         private void btnGenerateQR_Click(object sender, EventArgs e)
         {
-            if (!EnsureHasBill("Bàn / Đơn này chưa có hóa đơn cần thanh toán!")) return;
+            if (_selectedTableId == -1)
+            {
+                ShowWarning("Vui lòng chọn bàn hoặc đơn hàng cần thanh toán!");
+                return;
+            }
+            if (FinalTotal <= 0)
+            {
+                ShowWarning("Bàn này chưa có món nào để tạo mã QR!");
+                return;
+            }
 
-            cboPaymentMethod.SelectedIndex = 1;
-            string qrUrl = SmartPaymentService.BuildVietQrUrl(FinalTotal, _selectedTableName);
-            picVietQR.LoadAsync(qrUrl);
+            // Gọi VietQR API v2 (POST JSON -> Base64ToImage) và hiển thị lên PictureBox
+            cboPaymentMethod.SelectedItem = "Chuyển khoản QR";
+            LoadQrImageSafe(picVietQR, FinalTotal, _selectedTableName);
         }
         private void btnPrintBill_Click(object sender, EventArgs e)
         {

@@ -106,6 +106,53 @@ namespace QuanLyCafe_Nhom8.GUI
             panel.ResumeLayout();
         }
 
+        /// <summary>
+        /// Hàm nạp ảnh VietQR từ API v2 (Base64 -> Image) vào PictureBox an toàn, không dùng LoadAsync để tránh lỗi dấu X đỏ
+        /// </summary>
+        private void LoadQrImageSafe(PictureBox targetBox, decimal amount, string tableName)
+        {
+            if (targetBox == null) return;
+            try
+            {
+                Cursor.Current = Cursors.WaitCursor;
+                Bitmap qrBmp = SmartPaymentService.GetQrBitmap(amount, tableName);
+
+                Image oldImg = targetBox.Image;
+                targetBox.Image = qrBmp;
+                if (oldImg != null && !ReferenceEquals(oldImg, qrBmp))
+                {
+                    oldImg.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowError("Lỗi tạo mã VietQR: " + ex.Message, "Lỗi VietQR");
+            }
+            finally
+            {
+                Cursor.Current = Cursors.Default;
+       
+            }
+        }
+
+
+        private Bitmap LoadQrImageSafe(decimal amount, string tableName)
+        {
+            try
+            {
+                return SmartPaymentService.GetQrBitmap(amount, tableName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Không thể tạo mã VietQR: " + ex.Message, "Lỗi VietQR API", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return null;
+            }
+        }
+
+        private void ShowWarning(string message)
+        {
+            MessageBox.Show(this, message, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
         // ==================== DỰNG BỐ CỤC 3 CỘT MÀN HÌNH POS ====================
 
         private void BuildModernPosInterface()
@@ -122,13 +169,13 @@ namespace QuanLyCafe_Nhom8.GUI
             Label lblBrand = new Label
             {
                 Text = "☕ COFFEE FEFA - NHÓM 8",
-                Font = Theme.Brand,
+                Font = new Font("Segoe UI", 12f, FontStyle.Bold),
                 ForeColor = Theme.CreamText,
-                Location = new Point(18, 15),
+                Location = new Point(12, 18),
                 AutoSize = true
             };
 
-            Button btnOpenChat = MakeButton("💬 Chat & Bot App", new Point(470, 11), new Size(150, 38), Theme.Blue, (s, e) =>
+            Button btnOpenChat = MakeButton("💬 Chat ", new Point(242, 11), new Size(106, 38), Theme.Blue, (s, e) =>
             {
                 NetworkClient.Instance.ShowInAppChatAndStatsDialog(this, this.Text.Contains("Admin") ? "Quản lý" : "Thu ngân");
             });
@@ -136,6 +183,7 @@ namespace QuanLyCafe_Nhom8.GUI
             Button btnOpenKDS = MakeButton("🔔 Màn hình Pha chế", new Point(630, 11), new Size(205, 38), Theme.Orange, (s, e) =>
             {
                 FrmKDS kdsForm = new FrmKDS();
+                kdsForm.TopMost = true;
                 kdsForm.Show();
             });
 
@@ -155,8 +203,8 @@ namespace QuanLyCafe_Nhom8.GUI
                     frm.ShowDialog(this);
                 }
             });
+
             pnlTopHeader.Controls.AddRange(new Control[] { lblBrand, btnOpenChat, btnOpenKDS, btnOpenMenu, btnOpenStats });
-            pnlTopHeader.Controls.AddRange(new Control[] { lblBrand, btnOpenKDS, btnOpenMenu, btnOpenStats });
 
             // 2. CỘT TRÁI: KÊNH BÁN HÀNG & SƠ ĐỒ BÀN
             Panel pnlLeft = new Panel { Location = new Point(15, 72), Size = new Size(455, 680), BackColor = Color.White };
@@ -331,13 +379,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 BackColor = Theme.BgBoard,
                 BorderStyle = BorderStyle.FixedSingle,
                 SizeMode = PictureBoxSizeMode.Zoom
-            };
-            picVietQR.LoadCompleted += (s, e) =>
-            {
-                if (e.Error != null)
-                {
-                    ShowError("Không thể tải ảnh VietQR. Vui lòng kiểm tra kết nối mạng!", "Lỗi tải QR");
-                }
             };
 
             Button btnPrintBill = MakeButton("🖨 Xem & In Bill Tính Tiền", new Point(18, 434), new Size(276, 40), Theme.Green, btnPrintBill_Click);
@@ -585,7 +626,7 @@ namespace QuanLyCafe_Nhom8.GUI
             sb.AppendLine("        HIGHLAND COFFEE POS - NHÓM 8");
             sb.AppendLine("      ĐC: Công Viên Thủy Tinh, Thủ Đức");
             sb.AppendLine("==========================================");
-            sb.AppendLine("         PHIẾU TẠM TÍNH / HÓA ĐƠN");
+            sb.AppendLine("          PHIẾU TẠM TÍNH / HÓA ĐƠN");
             sb.AppendLine($"Bàn / Đơn : {_selectedTableName}");
             sb.AppendLine($"Thời gian : {DateTime.Now:dd/MM/yyyy HH:mm:ss}");
             sb.AppendLine($"Hình thức : {method}");
@@ -645,13 +686,14 @@ namespace QuanLyCafe_Nhom8.GUI
                     BorderStyle = BorderStyle.FixedSingle
                 };
 
+                // Nếu ngoài màn hình chính đã tạo VietQR thì lấy luôn, chưa có thì gọi API tạo mới
                 if (picVietQR.Image != null)
                 {
-                    picBillQR.Image = picVietQR.Image;
+                    picBillQR.Image = (Image)picVietQR.Image.Clone();
                 }
                 else
                 {
-                    picBillQR.LoadAsync(SmartPaymentService.BuildVietQrUrl(FinalTotal, _selectedTableName));
+                    LoadQrImageSafe(picBillQR, FinalTotal, _selectedTableName);
                 }
 
                 Button btnPrintPdf = MakeButton(

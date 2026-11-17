@@ -320,141 +320,157 @@ namespace QuanLyCafe_Nhom8.Services
 
         // ==================== CỬA SỔ CHAT NỘI BỘ & TRA CỨU THỐNG KÊ TRÊN APP (THAY TELEGRAM BOT) ====================
 
+        private Form _activeChatForm = null;
+
         public void ShowInAppChatAndStatsDialog(Form parentForm, string currentRoleName = "Quản lý / Thu ngân")
         {
-            using (Form chatForm = new Form())
+            // Nếu cửa sổ Chat đang mở sẵn thì đưa lên trên cùng, cho phép kéo thả song song với màn hình POS
+            if (_activeChatForm != null && !_activeChatForm.IsDisposed)
             {
-                chatForm.Text = $"Chat Nội Bộ LAN & Bot Thống Kê Trên App (TCP {ServerHost}:{ServerPort})";
-                chatForm.Size = new Size(760, 560);
-                chatForm.StartPosition = FormStartPosition.CenterParent;
-                chatForm.BackColor = Color.FromArgb(244, 239, 234);
-
-                Panel pnlHeader = new Panel
-                {
-                    Dock = DockStyle.Top,
-                    Height = 56,
-                    BackColor = Color.FromArgb(62, 39, 35)
-                };
-
-                Label lblHeader = new Label
-                {
-                    Text = "💬 KÊNH CHAT NỘI BỘ LAN & TRA CỨU THỐNG KÊ NHANH TRÊN APP",
-                    Font = new Font("Segoe UI", 12f, FontStyle.Bold),
-                    ForeColor = Color.FromArgb(255, 224, 178),
-                    Location = new Point(16, 15),
-                    AutoSize = true
-                };
-                pnlHeader.Controls.Add(lblHeader);
-
-                RichTextBox rtbChat = new RichTextBox
-                {
-                    Location = new Point(16, 70),
-                    Size = new Size(710, 340),
-                    ReadOnly = true,
-                    BackColor = Color.White,
-                    Font = new Font("Segoe UI", 10f),
-                    BorderStyle = BorderStyle.FixedSingle
-                };
-
-                // Các nút lệnh thống kê nhanh ngay trên App (thay thế hoàn toàn Telegram Bot)
-                Button btnCmdToday = CreateQuickCmdButton("📊 /homnay (Doanh thu hôm nay)", new Point(16, 420), 210, async () =>
-                    await SendFrameAsync(MsgType.STATS_COMMAND, "/homnay"));
-
-                Button btnCmdYesterday = CreateQuickCmdButton("📅 /homqua (Doanh thu hôm qua)", new Point(234, 420), 210, async () =>
-                    await SendFrameAsync(MsgType.STATS_COMMAND, "/homqua"));
-
-                Button btnCmdTables = CreateQuickCmdButton("☕ /ban (Bàn đang có khách)", new Point(452, 420), 150, async () =>
-                    await SendFrameAsync(MsgType.STATS_COMMAND, "/ban"));
-
-                Button btnCmdCancelLog = CreateQuickCmdButton("⚠️ /huymon (Lịch sử hủy)", new Point(610, 420), 116, async () =>
-                    await SendFrameAsync(MsgType.STATS_COMMAND, "/huymon"));
-
-                TextBox txtMsg = new TextBox
-                {
-                    Location = new Point(16, 466),
-                    Size = new Size(575, 32),
-                    Font = new Font("Segoe UI", 10.5f)
-                };
-
-                Button btnSend = new Button
-                {
-                    Text = "Gửi TCP ➔",
-                    Location = new Point(600, 464),
-                    Size = new Size(126, 34),
-                    BackColor = Color.FromArgb(39, 174, 96),
-                    ForeColor = Color.White,
-                    FlatStyle = FlatStyle.Flat,
-                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                    Cursor = Cursors.Hand
-                };
-                btnSend.FlatAppearance.BorderSize = 0;
-
-                Action refreshChatBox = () =>
-                {
-                    if (rtbChat.IsDisposed) return;
-                    StringBuilder sb = new StringBuilder();
-                    sb.AppendLine("💡 MẸO: Bấm các nút lệnh bên dưới hoặc gõ /homnay, /homqua, /ban, /huymon hoặc tin nhắn bất kỳ để gửi qua TCP Socket cho toàn bộ máy trạm!");
-                    sb.AppendLine("--------------------------------------------------------------------------------");
-                    lock (ChatHistory)
-                    {
-                        foreach (string line in ChatHistory)
-                        {
-                            sb.AppendLine(line);
-                            sb.AppendLine();
-                        }
-                    }
-                    rtbChat.Text = sb.ToString();
-                    rtbChat.SelectionStart = rtbChat.Text.Length;
-                    rtbChat.ScrollToCaret();
-                };
-
-                Action<string, string> eventHandler = (type, payload) =>
-                {
-                    if (type == MsgType.CHAT_MESSAGE && !chatForm.IsDisposed)
-                    {
-                        chatForm.BeginInvoke(new Action(refreshChatBox));
-                    }
-                };
-
-                OnServerEventReceived += eventHandler;
-                chatForm.FormClosing += (s, e) => OnServerEventReceived -= eventHandler;
-
-                Func<Task> sendAction = async () =>
-                {
-                    string raw = txtMsg.Text.Trim();
-                    if (string.IsNullOrEmpty(raw)) return;
-                    txtMsg.Clear();
-
-                    if (raw.StartsWith("/"))
-                    {
-                        await SendFrameAsync(MsgType.STATS_COMMAND, raw);
-                    }
-                    else
-                    {
-                        await SendFrameAsync(MsgType.CHAT_MESSAGE, $"[{currentRoleName} - {DateTime.Now:HH:mm}]: {raw}");
-                    }
-                };
-
-                btnSend.Click += async (s, e) => await sendAction();
-                txtMsg.KeyDown += async (s, e) =>
-                {
-                    if (e.KeyCode == Keys.Enter)
-                    {
-                        e.SuppressKeyPress = true;
-                        await sendAction();
-                    }
-                };
-
-                refreshChatBox();
-
-                chatForm.Controls.AddRange(new Control[]
-                {
-                    pnlHeader, rtbChat,
-                    btnCmdToday, btnCmdYesterday, btnCmdTables, btnCmdCancelLog,
-                    txtMsg, btnSend
-                });
-                chatForm.ShowDialog(parentForm);
+                _activeChatForm.BringToFront();
+                _activeChatForm.Focus();
+                return;
             }
+
+            Form chatForm = new Form
+            {
+                Text = $"Chat Nội Bộ LAN & Bot Thống Kê Trên App (TCP {ServerHost}:{ServerPort})",
+                Size = new Size(760, 560),
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(560, 140),
+                BackColor = Color.FromArgb(244, 239, 234)
+            };
+            _activeChatForm = chatForm;
+
+            Panel pnlHeader = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 56,
+                BackColor = Color.FromArgb(62, 39, 35)
+            };
+
+            Label lblHeader = new Label
+            {
+                Text = "💬 KÊNH CHAT NỘI BỘ LAN && TRA CỨU THỐNG KÊ NHANH TRÊN APP",
+                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(255, 224, 178),
+                Location = new Point(16, 16),
+                AutoSize = true
+            };
+            pnlHeader.Controls.Add(lblHeader);
+
+            RichTextBox rtbChat = new RichTextBox
+            {
+                Location = new Point(16, 70),
+                Size = new Size(710, 340),
+                ReadOnly = true,
+                BackColor = Color.White,
+                Font = new Font("Segoe UI", 10f),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            // 4 nút lệnh vừa vặn chiều rộng, không bị khuất chữ
+            Button btnCmdToday = CreateQuickCmdButton("📊 /homnay (Hôm nay)", new Point(16, 420), 172, async () =>
+                await SendFrameAsync(MsgType.STATS_COMMAND, "/homnay"));
+
+            Button btnCmdYesterday = CreateQuickCmdButton("📅 /homqua (Hôm qua)", new Point(195, 420), 172, async () =>
+                await SendFrameAsync(MsgType.STATS_COMMAND, "/homqua"));
+
+            Button btnCmdTables = CreateQuickCmdButton("☕ /ban (Bàn có khách)", new Point(374, 420), 172, async () =>
+                await SendFrameAsync(MsgType.STATS_COMMAND, "/ban"));
+
+            Button btnCmdCancelLog = CreateQuickCmdButton("⚠️ /huymon (Hủy món)", new Point(553, 420), 173, async () =>
+                await SendFrameAsync(MsgType.STATS_COMMAND, "/huymon"));
+
+            TextBox txtMsg = new TextBox
+            {
+                Location = new Point(16, 466),
+                Size = new Size(575, 32),
+                Font = new Font("Segoe UI", 10.5f)
+            };
+
+            Button btnSend = new Button
+            {
+                Text = "Gửi TCP ➔",
+                Location = new Point(600, 464),
+                Size = new Size(126, 34),
+                BackColor = Color.FromArgb(39, 174, 96),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btnSend.FlatAppearance.BorderSize = 0;
+
+            Action refreshChatBox = () =>
+            {
+                if (rtbChat.IsDisposed) return;
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("💡 MẸO: Bấm các nút bên dưới hoặc gõ /homnay, /homqua, /ban, /huymon để tra cứu qua TCP Socket!");
+                sb.AppendLine("--------------------------------------------------------------------------------");
+                lock (ChatHistory)
+                {
+                    foreach (string line in ChatHistory)
+                    {
+                        sb.AppendLine(line);
+                        sb.AppendLine();
+                    }
+                }
+                rtbChat.Text = sb.ToString();
+                rtbChat.SelectionStart = rtbChat.Text.Length;
+                rtbChat.ScrollToCaret();
+            };
+
+            Action<string, string> eventHandler = (type, payload) =>
+            {
+                if (type == MsgType.CHAT_MESSAGE && !chatForm.IsDisposed && chatForm.IsHandleCreated)
+                {
+                    chatForm.BeginInvoke(new Action(refreshChatBox));
+                }
+            };
+
+            OnServerEventReceived += eventHandler;
+            chatForm.FormClosing += (s, e) => OnServerEventReceived -= eventHandler;
+
+            Func<Task> sendAction = async () =>
+            {
+                string raw = txtMsg.Text.Trim();
+                if (string.IsNullOrEmpty(raw)) return;
+                txtMsg.Clear();
+
+                if (raw.StartsWith("/"))
+                {
+                    await SendFrameAsync(MsgType.STATS_COMMAND, raw);
+                }
+                else
+                {
+                    await SendFrameAsync(MsgType.CHAT_MESSAGE, $"[{currentRoleName} - {DateTime.Now:HH:mm}]: {raw}");
+                }
+            };
+
+            btnSend.Click += async (s, e) => await sendAction();
+            txtMsg.KeyDown += async (s, e) =>
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    await sendAction();
+                }
+            };
+
+            refreshChatBox();
+
+            chatForm.Controls.AddRange(new Control[]
+            {
+                pnlHeader, rtbChat,
+                btnCmdToday, btnCmdYesterday, btnCmdTables, btnCmdCancelLog,
+                txtMsg, btnSend
+            });
+
+            // Mở dạng Non-Modal (.Show) để người dùng vừa để bảng Chat vừa bấm & kéo thả màn hình POS bên dưới
+            chatForm.Show();
+            chatForm.TopMost = true;
+            chatForm.Show(parentForm);
         }
 
         private static Button CreateQuickCmdButton(string text, Point loc, int width, Func<Task> onClick)
