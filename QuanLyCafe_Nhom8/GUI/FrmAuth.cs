@@ -14,7 +14,7 @@ namespace QuanLyCafe_Nhom8.GUI
 {
     public class FrmAuth : Form
     {
-        private readonly UserDAL _userDal = new UserDAL();
+        private readonly UserProxyService _userProxy = new UserProxyService();
 
         // Trạng thái OTP Quên mật khẩu
         private string _forgotOtp = "";
