@@ -71,7 +71,6 @@
     </Compile>
     <Compile Include="GUI\FrmMainPOS.Layout.cs">
       <DependentUpon>FrmMainPOS.cs</DependentUpon>
-      <SubType>Form</SubType>
     </Compile>
     <Compile Include="GUI\FrmMenuManager.cs">
       <SubType>Form</SubType>
