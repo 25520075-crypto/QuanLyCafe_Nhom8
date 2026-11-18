@@ -2,35 +2,39 @@
 using System.Data;
 using System.Drawing;
 using System.Windows.Forms;
-using QuanLyCafe_Nhom8.DAL;
 using QuanLyCafe_Nhom8.Services;
 
 namespace QuanLyCafe_Nhom8.GUI
 {
     public partial class FrmKDS : Form
     {
-        // Khai báo lớp truy xuất dữ liệu POS và bộ đếm thời gian làm mới tự động
-        private readonly PosServiceDAL _posDal = new PosServiceDAL();
+        // Sử dụng NetworkClient TCP Realtime thay thế hoàn toàn cho Timer 3 giây cục bộ
+        private readonly NetworkClient _netClient = NetworkClient.Instance;
         private DataGridView dgvPending;
         private Button btnCompleteItem;
         private Button btnRefresh;
         private Label lblCount;
-        private Timer _refreshTimer;
+        private Label lblTcpStatus;
 
         public FrmKDS()
         {
             InitializeComponent();
             BuildKdsInterface();
+
+            _netClient.Start();
+            _netClient.OnServerEventReceived += OnTcpEventReceived;
+            _netClient.OnConnectionStateChanged += OnTcpConnectionChanged;
+
+            // Tự động đồng bộ danh sách món đang chờ ngay khi mở màn hình KDS
+            _ = _netClient.SendFrameAsync(MsgType.GET_PENDING_KDS, "SYNC");
             LoadPendingOrders();
-            StartAutoRefresh();
         }
 
-        // Thiết kế giao diện Màn hình Quầy Pha Chế (KDS)
         private void BuildKdsInterface()
         {
-            this.Text = "Màn hình Quầy Pha Chế Real-time (KDS) - Nhóm 8";
+            this.Text = "Màn hình Quầy Pha Chế Real-time (TCP Socket Client) - Nhóm 8";
             this.Size = new Size(920, 600);
-            this.StartPosition = FormStartPosition.CenterParent;
+            this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = Color.FromArgb(248, 245, 241);
 
             Panel pnlHeader = new Panel
@@ -42,10 +46,19 @@ namespace QuanLyCafe_Nhom8.GUI
 
             Label lblTitle = new Label
             {
-                Text = "QUẦY PHA CHẾ REAL-TIME (KITCHEN DISPLAY SYSTEM)",
-                Font = new Font("Segoe UI", 14, FontStyle.Bold),
+                Text = "QUẦY PHA CHẾ REAL-TIME (TCP SOCKET CLIENT)",
+                Font = new Font("Segoe UI", 13.5f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(255, 236, 179),
-                Location = new Point(20, 18),
+                Location = new Point(20, 10),
+                AutoSize = true
+            };
+
+            lblTcpStatus = new Label
+            {
+                Text = $"🟢 TCP Connected ({_netClient.ServerHost}:{_netClient.ServerPort}) - Chế độ Push Realtime (Không dùng Timer)",
+                Font = new Font("Segoe UI", 9f, FontStyle.Italic),
+                ForeColor = Color.FromArgb(129, 199, 132),
+                Location = new Point(22, 38),
                 AutoSize = true
             };
 
@@ -59,6 +72,7 @@ namespace QuanLyCafe_Nhom8.GUI
             };
 
             pnlHeader.Controls.Add(lblTitle);
+            pnlHeader.Controls.Add(lblTcpStatus);
             pnlHeader.Controls.Add(lblCount);
 
             dgvPending = new DataGridView
@@ -78,7 +92,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnCompleteItem = new Button
             {
-                Text = "✔ HOÀN THÀNH & GIAO MÓN ĐANG CHỌN",
+                Text = "✔ HOÀN THÀNH & BÁO VỀ THU NGÂN QUA TCP",
                 Location = new Point(20, 495),
                 Size = new Size(650, 48),
                 BackColor = Color.FromArgb(39, 174, 96),
@@ -92,7 +106,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnRefresh = new Button
             {
-                Text = "🔄 Làm mới ngay",
+                Text = "🔄 Đồng bộ TCP",
                 Location = new Point(685, 495),
                 Size = new Size(200, 48),
                 BackColor = Color.FromArgb(109, 76, 65),
@@ -102,7 +116,11 @@ namespace QuanLyCafe_Nhom8.GUI
                 Cursor = Cursors.Hand
             };
             btnRefresh.FlatAppearance.BorderSize = 0;
-            btnRefresh.Click += (s, e) => LoadPendingOrders();
+            btnRefresh.Click += async (s, e) =>
+            {
+                await _netClient.SendFrameAsync(MsgType.GET_PENDING_KDS, "SYNC");
+                LoadPendingOrders();
+            };
 
             this.Controls.Add(pnlHeader);
             this.Controls.Add(dgvPending);
@@ -110,24 +128,49 @@ namespace QuanLyCafe_Nhom8.GUI
             this.Controls.Add(btnRefresh);
         }
 
-        // Khởi tạo Timer tự động làm mới danh sách món chờ pha chế mỗi 3 giây (3000ms)
-        private void StartAutoRefresh()
+        // Nhận gói tin KDS_NEW_ORDER từ Server đẩy sang ngay khi Thu ngân bấm 'Gửi pha chế'
+        private void OnTcpEventReceived(string msgType, string payload)
         {
-            _refreshTimer = new Timer { Interval = 3000 };
-            _refreshTimer.Tick += (s, e) => LoadPendingOrders();
-            _refreshTimer.Start();
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+
+            if (msgType == MsgType.KDS_NEW_ORDER || msgType == MsgType.KDS_ITEM_DONE)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    LoadPendingOrders();
+                    if (msgType == MsgType.KDS_NEW_ORDER)
+                    {
+                        SmartPaymentService.PlaySuccessSound();
+                    }
+                }));
+            }
         }
 
-        // Tải danh sách các món có trạng thái 'Chờ pha chế' từ CSDL lên bảng
+        // Tự động gửi GET_PENDING_KDS khi kết nối lại mạng thành công
+        private void OnTcpConnectionChanged(bool connected, string statusText)
+        {
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+
+            this.BeginInvoke(new Action(async () =>
+            {
+                lblTcpStatus.Text = connected ? $"🟢 {statusText}" : $"🟠 {statusText}";
+                lblTcpStatus.ForeColor = connected ? Color.FromArgb(129, 199, 132) : Color.FromArgb(255, 183, 77);
+                if (connected)
+                {
+                    await _netClient.SendFrameAsync(MsgType.GET_PENDING_KDS, "RECONNECT_SYNC");
+                    LoadPendingOrders();
+                }
+            }));
+        }
+
         private void LoadPendingOrders()
         {
-            DataTable dt = _posDal.GetPendingKitchenItems();
+            DataTable dt = _netClient.GetPendingKitchenItems();
             dgvPending.DataSource = dt;
             lblCount.Text = $"Đang chờ: {dt.Rows.Count} món";
         }
 
-        // Sự kiện khi nhân viên pha chế bấm nút Hoàn thành món
-        private void btnCompleteItem_Click(object sender, EventArgs e)
+        private async void btnCompleteItem_Click(object sender, EventArgs e)
         {
             if (dgvPending.CurrentRow == null)
             {
@@ -135,22 +178,28 @@ namespace QuanLyCafe_Nhom8.GUI
                 return;
             }
 
-            // Lấy Mã chi tiết hóa đơn (cột 0), Tên Bàn/Đơn (cột 1) và Tên món (cột 2)
             int billDetailId = Convert.ToInt32(dgvPending.CurrentRow.Cells[0].Value);
             string tableName = dgvPending.CurrentRow.Cells[1].Value.ToString();
             string productName = dgvPending.CurrentRow.Cells[2].Value.ToString();
 
-            // Cập nhật trạng thái món sang 'Đã phục vụ' trong SQL Server
-            _posDal.MarkKitchenItemDone(billDetailId);
-            SmartPaymentService.PlaySuccessSound();
-            LoadPendingOrders();
-            MessageBox.Show($"Đã hoàn thành món [{productName}] cho [{tableName}]!", "Quầy Bar", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            btnCompleteItem.Enabled = false;
+            try
+            {
+                await _netClient.MarkKitchenItemDoneAsync(billDetailId, tableName, productName);
+                SmartPaymentService.PlaySuccessSound();
+                LoadPendingOrders();
+                MessageBox.Show($"Đã hoàn thành món [{productName}] cho [{tableName}] và báo về máy Thu ngân qua TCP!", "Quầy Bar (TCP)", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            finally
+            {
+                btnCompleteItem.Enabled = true;
+            }
         }
 
-        // Dừng Timer khi đóng màn hình KDS để giải phóng bộ nhớ
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            _refreshTimer?.Stop();
+            _netClient.OnServerEventReceived -= OnTcpEventReceived;
+            _netClient.OnConnectionStateChanged -= OnTcpConnectionChanged;
             base.OnFormClosing(e);
         }
 

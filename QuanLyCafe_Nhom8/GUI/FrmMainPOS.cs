@@ -1,6 +1,4 @@
-﻿using QuanLyCafe_Nhom8.DAL;
-using QuanLyCafe_Nhom8.DTO;
-using QuanLyCafe_Nhom8.GUI;
+﻿using QuanLyCafe_Nhom8.DTO;
 using QuanLyCafe_Nhom8.Services;
 using System;
 using System.Collections.Generic;
@@ -17,8 +15,8 @@ namespace QuanLyCafe_Nhom8.GUI
         private enum Channel { DineIn, TakeAway, ShopeeXanh, Grab }
         private const string StatusEmpty = "Trống";
 
-        // Tầng dữ liệu và trạng thái màn hình POS
-        private readonly PosServiceDAL _posDal = new PosServiceDAL();
+        // Sử dụng NetworkClient (TCP/UDP Length-Prefix 4 byte) thay vì gọi trực tiếp DAL hay TelegramBotService
+        private readonly NetworkClient _netClient = NetworkClient.Instance;
         private List<ProductDTO> _allProducts = new List<ProductDTO>();
         private List<TableDTO> _cachedTables = new List<TableDTO>();
         private readonly Dictionary<int, int> _tableDiscounts = new Dictionary<int, int>();
@@ -29,18 +27,46 @@ namespace QuanLyCafe_Nhom8.GUI
         private decimal _currentRawTotal = 0;
         private int _approvedDiscountPercent = 0;
 
-        // Tính tổng tiền sau giảm giá tại một nơi duy nhất
         private decimal FinalTotal => _currentRawTotal - (_currentRawTotal * _approvedDiscountPercent / 100m);
 
         public FrmMainPOS()
         {
             InitializeComponent();
             BuildModernPosInterface();
+
+            // Khởi động kết nối UDP Discovery + TCP Session Client
+            _netClient.Start();
+            _netClient.OnServerEventReceived += OnTcpServerEventReceived;
+
             LoadAllProducts();
             SwitchChannelTab(Channel.DineIn, reloadFromDb: true);
 
             // Tự động bật luồng lắng nghe lệnh Telegram 2 chiều (/homnay, /homqua, /ban, /huymon)
             new TelegramBotService().StartTwoWayListener();
+        }
+
+        // Lắng nghe sự kiện Realtime từ TCP Server đẩy về (< 1 giây)
+        private void OnTcpServerEventReceived(string msgType, string payload)
+        {
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+
+            this.BeginInvoke(new Action(() =>
+            {
+                if (msgType == MsgType.TABLE_STATUS_CHANGED || msgType == MsgType.KDS_ITEM_DONE)
+                {
+                    RefreshAll(reloadTablesFromDb: true);
+                }
+                else if (msgType == MsgType.MENU_UPDATED)
+                {
+                    LoadAllProducts();
+                }
+            }));
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            _netClient.OnServerEventReceived -= OnTcpServerEventReceived;
+            base.OnFormClosing(e);
         }
 
         // ==================== HÀM KIỂM TRA & LÀM MỚI DỮ LIỆU ====================
@@ -138,7 +164,7 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 if (reloadFromDb || _cachedTables.Count == 0)
                 {
-                    _cachedTables = _posDal.GetAllTables();
+                    _cachedTables = _netClient.GetAllTables();
                 }
 
                 ClearAndDispose(flpTables);
@@ -181,7 +207,7 @@ namespace QuanLyCafe_Nhom8.GUI
         {
             try
             {
-                _allProducts = _posDal.GetActiveProducts();
+                _allProducts = _netClient.GetActiveProducts();
                 BindProductList(_allProducts);
             }
             catch (Exception ex)
@@ -220,14 +246,12 @@ namespace QuanLyCafe_Nhom8.GUI
                 _selectedTableId = table.TableId;
                 _selectedTableName = table.TableName;
 
-                // Khôi phục % giảm giá đã duyệt của riêng bàn này
                 _approvedDiscountPercent = _tableDiscounts.TryGetValue(_selectedTableId, out int savedDiscount) ? savedDiscount : 0;
                 nudDiscount.Value = _approvedDiscountPercent;
 
                 lblSelectedTable.Text = $"ĐANG PHỤC VỤ: {_selectedTableName.ToUpper()} ({table.Status})";
                 picVietQR.Image = null;
 
-                // Chỉ vẽ lại viền chọn bàn từ bộ nhớ đệm, không gọi lại DB
                 LoadTablesToBoard(reloadFromDb: false);
                 LoadBillForSelectedTable();
             }
@@ -239,7 +263,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             try
             {
-                DataTable dt = _posDal.GetBillDetailsByTable(_selectedTableId);
+                DataTable dt = _netClient.GetBillDetailsByTable(_selectedTableId);
                 dgvBillDetails.DataSource = dt;
                 if (dgvBillDetails.Columns["BillDetailId"] != null)
                 {
@@ -274,9 +298,9 @@ namespace QuanLyCafe_Nhom8.GUI
                 : $"TỔNG THANH TOÁN: {FinalTotal:N0} VNĐ";
         }
 
-        // ==================== SỰ KIỆN NGHIỆP VỤ POS ====================
+        // ==================== SỰ KIỆN NGHIỆP VỤ POS QUA TCP NETWORKCLIENT ====================
 
-        private void btnAddItem_Click(object sender, EventArgs e)
+        private async void btnAddItem_Click(object sender, EventArgs e)
         {
             if (_selectedTableId == -1)
             {
@@ -289,32 +313,40 @@ namespace QuanLyCafe_Nhom8.GUI
                 return;
             }
 
+            Button btn = sender as Button;
             try
             {
+                if (btn != null) btn.Enabled = false;
                 int productId = Convert.ToInt32(cboProducts.SelectedValue);
                 int quantity = Convert.ToInt32(nudQuantity.Value);
 
-                _posDal.AddItemToTable(_selectedTableId, productId, quantity);
+                await _netClient.AddItemToTableAsync(_selectedTableId, productId, quantity);
                 RefreshAll();
             }
             catch (Exception ex)
             {
                 ShowError("Lỗi khi thêm món: " + ex.Message);
             }
+            finally
+            {
+                if (btn != null) btn.Enabled = true;
+            }
         }
 
-        private void btnSendKitchen_Click(object sender, EventArgs e)
+        private async void btnSendKitchen_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Chưa có món nào trong bàn để gửi pha chế!")) return;
 
+            Button btn = sender as Button;
             try
             {
-                int sentCount = _posDal.SendTableOrderToKitchen(_selectedTableId);
+                if (btn != null) btn.Enabled = false;
+                int sentCount = await _netClient.SendTableOrderToKitchenAsync(_selectedTableId, _selectedTableName);
                 if (sentCount > 0)
                 {
                     SmartPaymentService.PlaySuccessSound();
                     LoadBillForSelectedTable();
-                    Info($"Đã gửi {sentCount} món của [{_selectedTableName}] xuống quầy pha chế!", "Đã gửi pha chế");
+                    Info($"Đã đẩy {sentCount} món của [{_selectedTableName}] qua TCP Socket xuống màn hình Quầy Pha Chế!", "Đã gửi pha chế (TCP)");
                 }
                 else
                 {
@@ -325,9 +357,13 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 ShowError("Lỗi khi gửi pha chế: " + ex.Message);
             }
+            finally
+            {
+                if (btn != null) btn.Enabled = true;
+            }
         }
 
-        private void btnRemoveItem_Click(object sender, EventArgs e)
+        private async void btnRemoveItem_Click(object sender, EventArgs e)
         {
             if (_selectedTableId == -1 || dgvBillDetails.CurrentRow == null)
             {
@@ -351,11 +387,12 @@ namespace QuanLyCafe_Nhom8.GUI
 
             try
             {
-                _posDal.RemoveBillDetailItem(billDetailId, _selectedTableId);
+                await _netClient.RemoveBillDetailItemAsync(billDetailId, _selectedTableId, _selectedTableName, itemName, isSentToKitchen, managerName);
                 RefreshAll();
 
                 if (isSentToKitchen)
                 {
+                    Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).\nCảnh báo hủy món đã được phát qua Kênh Chat Nội Bộ TCP!", "Đã hủy món");
                     try
                     {
                         new TelegramBotService().GuiTin(
@@ -401,7 +438,7 @@ namespace QuanLyCafe_Nhom8.GUI
             Info($"Đã duyệt giảm giá {_approvedDiscountPercent}% bởi Quản lý: {managerName}!", "Thành công");
         }
 
-        private void btnMoveTable_Click(object sender, EventArgs e)
+        private async void btnMoveTable_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Vui lòng chọn bàn đang có khách cần chuyển đi!")) return;
 
@@ -411,7 +448,7 @@ namespace QuanLyCafe_Nhom8.GUI
             try
             {
                 int oldTableId = _selectedTableId;
-                _posDal.MoveToEmptyTable(oldTableId, targetTable.TableId);
+                await _netClient.MoveToEmptyTableAsync(oldTableId, targetTable.TableId);
 
                 if (_tableDiscounts.TryGetValue(oldTableId, out int discount))
                 {
@@ -430,7 +467,7 @@ namespace QuanLyCafe_Nhom8.GUI
             }
         }
 
-        private void btnMergeTable_Click(object sender, EventArgs e)
+        private async void btnMergeTable_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Vui lòng chọn bàn đang có khách cần gộp!")) return;
 
@@ -440,7 +477,7 @@ namespace QuanLyCafe_Nhom8.GUI
             try
             {
                 int sourceTableId = _selectedTableId;
-                _posDal.MergeOccupiedTables(sourceTableId, targetTable.TableId);
+                await _netClient.MergeOccupiedTablesAsync(sourceTableId, targetTable.TableId);
 
                 _tableDiscounts.Remove(sourceTableId);
                 _tableDiscounts.Remove(targetTable.TableId);
@@ -460,13 +497,21 @@ namespace QuanLyCafe_Nhom8.GUI
 
         private void btnGenerateQR_Click(object sender, EventArgs e)
         {
-            if (!EnsureHasBill("Bàn / Đơn này chưa có hóa đơn cần thanh toán!")) return;
+            if (_selectedTableId == -1)
+            {
+                ShowWarning("Vui lòng chọn bàn hoặc đơn hàng cần thanh toán!");
+                return;
+            }
+            if (FinalTotal <= 0)
+            {
+                ShowWarning("Bàn này chưa có món nào để tạo mã QR!");
+                return;
+            }
 
-            cboPaymentMethod.SelectedIndex = 1;
-            string qrUrl = SmartPaymentService.BuildVietQrUrl(FinalTotal, _selectedTableName);
-            picVietQR.LoadAsync(qrUrl);
+            // Gọi VietQR API v2 (POST JSON -> Base64ToImage) và hiển thị lên PictureBox
+            cboPaymentMethod.SelectedItem = "Chuyển khoản QR";
+            LoadQrImageSafe(picVietQR, FinalTotal, _selectedTableName);
         }
-
         private void btnPrintBill_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Chưa có hóa đơn để in!")) return;
@@ -474,7 +519,7 @@ namespace QuanLyCafe_Nhom8.GUI
             try
             {
                 string method = cboPaymentMethod.SelectedItem?.ToString() ?? "Tiền mặt";
-                DataTable dtItems = _posDal.GetBillDetailsByTable(_selectedTableId);
+                DataTable dtItems = _netClient.GetBillDetailsByTable(_selectedTableId);
                 string receiptContent = BuildReceiptText(dtItems, method);
                 ShowReceiptPreviewDialog(receiptContent);
             }
@@ -484,7 +529,7 @@ namespace QuanLyCafe_Nhom8.GUI
             }
         }
 
-        private void btnConfirmPayment_Click(object sender, EventArgs e)
+        private async void btnConfirmPayment_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Không có hóa đơn để thanh toán!")) return;
 
@@ -501,7 +546,8 @@ namespace QuanLyCafe_Nhom8.GUI
 
             try
             {
-                if (_posDal.CheckoutTable(_selectedTableId, _approvedDiscountPercent, paymentMethod, out decimal finalPaid))
+                CheckoutResponseDTO res = await _netClient.CheckoutTableAsync(_selectedTableId, _selectedTableName, _approvedDiscountPercent, paymentMethod);
+                if (res.IsSuccess)
                 {
                     string paidTableName = _selectedTableName;
                     _tableDiscounts.Remove(_selectedTableId);
@@ -512,7 +558,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
                     RefreshAll();
                     SmartPaymentService.PlaySuccessSound();
-                    Info($"Đã thanh toán thành công {paidTableName}!\n- Số tiền: {finalPaid:N0} VNĐ\n- Nguồn tiền: {paymentMethod}\n- Trạng thái: Bàn đã Trống.", "Hoàn tất");
+                    Info($"Đã thanh toán thành công {paidTableName}!\n- Số tiền: {res.FinalAmount:N0} VNĐ\n- Nguồn tiền: {paymentMethod}\n- Trạng thái: Bàn đã Trống.", "Hoàn tất");
                 }
                 else
                 {
