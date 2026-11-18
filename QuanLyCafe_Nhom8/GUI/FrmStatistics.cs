@@ -22,7 +22,8 @@ namespace QuanLyCafe_Nhom8.GUI
         Label lblTien = new Label();
         DataGridView dgv = new DataGridView();
 
-        TelegramBotService bot = new TelegramBotService();
+
+    
         int soDon = 0;
         decimal tongTien = 0;
 
@@ -76,7 +77,7 @@ namespace QuanLyCafe_Nhom8.GUI
             btnXuat.Size = new Size(120, 32);
             btnXuat.Click += BtnXuat_Click;
 
-            btnTele.Text = "Gui Telegram";
+            btnTele.Text = "Gui Bao Cao";
             btnTele.Location = new Point(160, 460);
             btnTele.Size = new Size(130, 32);
             btnTele.Click += BtnTele_Click;
