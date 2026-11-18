@@ -23,65 +23,93 @@ namespace QuanLyCafe_Nhom8.Services
 
     public static class SmartPaymentService
     {
-        public static string BankId = "970436";
-        public static int AcqId = 970436;
         // Thông tin tài khoản Vietcombank chính chủ của Nguyễn Hoàng Duy Anh
         public static string BankId = "970436";
+        public static int AcqId = 970436;
         public static string BankShortName = "Vietcombank";
         public static string AccountNo = "9942886521";
         public static string AccountName = "NGUYEN HOANG DUY ANH";
         public static string Template = "compact2";
 
+        // Ưu tiên gọi VietQR API v2 (POST JSON -> Base64), lỗi mạng tự chuyển sang vẽ thẻ QR dự phòng
         public static Bitmap GetQrBitmap(decimal amount, string tableName)
         {
             long roundedAmount = Convert.ToInt64(Math.Round(amount));
-            string cleanInfo = RemoveVietnameseAccents($"Thanh toan {tableName}").Trim();
+            string cleanTable = string.IsNullOrWhiteSpace(tableName) ? "Ban Cafe" : tableName.Trim();
+            string cleanInfo = RemoveVietnameseAccents($"Thanh toan {cleanTable}").Trim();
             if (cleanInfo.Length > 25) cleanInfo = cleanInfo.Substring(0, 25);
 
-            string jsonRequest = "{"
-                + $"\"accountNo\":\"{AccountNo}\","
-                + $"\"accountName\":\"{AccountName}\","
-                + $"\"acqId\":{AcqId},"
-                + $"\"amount\":{roundedAmount},"
-                + $"\"addInfo\":\"{cleanInfo}\","
-                + $"\"format\":\"text\","
-                + $"\"template\":\"{Template}\""
-                + "}";
-
-            ServicePointManager.Expect100Continue = true;
-            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | (SecurityProtocolType)3072;
-
-            using (WebClient client = new WebClient())
+            try
             {
-                client.Encoding = Encoding.UTF8;
-                client.Headers[HttpRequestHeader.ContentType] = "application/json";
-                client.Headers[HttpRequestHeader.Accept] = "application/json";
-                client.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+                string jsonRequest = "{"
+                    + $"\"accountNo\":\"{AccountNo}\","
+                    + $"\"accountName\":\"{AccountName}\","
+                    + $"\"acqId\":{AcqId},"
+                    + $"\"amount\":{roundedAmount},"
+                    + $"\"addInfo\":\"{cleanInfo}\","
+                    + $"\"format\":\"text\","
+                    + $"\"template\":\"{Template}\""
+                    + "}";
 
-                string responseJson = client.UploadString("https://api.vietqr.io/v2/generate", "POST", jsonRequest);
+                ServicePointManager.Expect100Continue = true;
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | (SecurityProtocolType)3072;
 
-                Match match = Regex.Match(responseJson, @"""qrDataURL""\s*:\s*""([^""]+)""");
-                if (match.Success)
+                using (WebClient client = new WebClient())
                 {
-                    string qrDataURL = match.Groups[1].Value.Replace(@"\/", "/");
-                    string base64String = qrDataURL.Replace("data:image/png;base64,", "").Trim();
-                    return Base64ToImage(base64String);
+                    client.Encoding = Encoding.UTF8;
+                    client.Headers[HttpRequestHeader.ContentType] = "application/json";
+                    client.Headers[HttpRequestHeader.Accept] = "application/json";
+                    client.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+
+                    string responseJson = client.UploadString("https://api.vietqr.io/v2/generate", "POST", jsonRequest);
+                    Match match = Regex.Match(responseJson, @"""qrDataURL""\s*:\s*""([^""]+)""");
+                    if (match.Success)
+                    {
+                        string qrDataURL = match.Groups[1].Value.Replace(@"\/", "/");
+                        string base64String = qrDataURL.Replace("data:image/png;base64,", "").Trim();
+                        return Base64ToImage(base64String);
+                    }
                 }
             }
+            catch
+            {
+                // Chuyển sang cơ chế dự phòng bên dưới nếu API v2 lỗi hoặc mất Internet
+            }
 
-            throw new Exception("Không nhận được qrDataURL từ máy chủ api.vietqr.io");
+            try
+            {
+                string emvPayload = BuildNapas247Payload(roundedAmount, cleanInfo);
+                string backupQrUrl = $"https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=10&data={Uri.EscapeDataString(emvPayload)}";
+
+                using (WebClient wc = new WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+                    byte[] qrBytes = wc.DownloadData(backupQrUrl);
+                    if (qrBytes != null && qrBytes.Length >= 200)
+                    {
+                        using (MemoryStream ms = new MemoryStream(qrBytes))
+                        using (Image qrImg = Image.FromStream(ms))
+                        {
+                            return DrawVietcombankCard(qrImg, roundedAmount);
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            Image localQr = TryLoadLocalFallbackQr();
+            Bitmap offlineBmp = DrawVietcombankCard(localQr, roundedAmount);
+            if (localQr != null) localQr.Dispose();
+            return offlineBmp;
         }
 
         public static Bitmap Base64ToImage(string base64String)
         {
             byte[] imageBytes = Convert.FromBase64String(base64String);
-            using (MemoryStream ms = new MemoryStream(imageBytes, 0, imageBytes.Length))
+            using (MemoryStream ms = new MemoryStream(imageBytes))
+            using (Image img = Image.FromStream(ms, true))
             {
-                ms.Write(imageBytes, 0, imageBytes.Length);
-                using (Image img = Image.FromStream(ms, true))
-                {
-                    return new Bitmap(img);
-                }
+                return new Bitmap(img);
             }
         }
 
@@ -90,112 +118,11 @@ namespace QuanLyCafe_Nhom8.Services
             string tempFilePath = Path.Combine(Path.GetTempPath(), $"vietqr_{Guid.NewGuid():N}.png");
             using (Bitmap bmp = GetQrBitmap(amount, tableName))
             {
-                bmp.Save(tempFilePath, System.Drawing.Imaging.ImageFormat.Png);
+                bmp.Save(tempFilePath, ImageFormat.Png);
             }
             return tempFilePath;
-        // Hàm trả về trực tiếp đối tượng Bitmap để gán thẳng vào PictureBox.Image (Không bao giờ bị lỗi X đỏ)
-        public static Bitmap GetQrBitmap(decimal amount, string tableName)
-        {
-            string filePath = BuildVietQrUrl(amount, tableName);
-            using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (Image img = Image.FromStream(fs))
-            {
-                return new Bitmap(img);
-            }
         }
 
-        // Hàm tạo và tải ảnh VietQR động (trả về đường dẫn file ảnh hợp lệ trên ổ cứng)
-        public static string BuildVietQrUrl(decimal amount, string tableName)
-        {
-            long roundedAmount = Convert.ToInt64(Math.Round(amount));
-            string cleanTable = string.IsNullOrWhiteSpace(tableName) ? "Ban Cafe" : tableName.Trim();
-            string addInfo = Uri.EscapeDataString($"Thanh toan {cleanTable}");
-            string accName = Uri.EscapeDataString(AccountName);
-
-            string tempFilePath = Path.Combine(Path.GetTempPath(), $"vietqr_{Guid.NewGuid():N}.png");
-
-            try
-            {
-                // Bật TLS 1.2 và TLS 1.3 (nếu hệ điều hành hỗ trợ)
-                ServicePointManager.Expect100Continue = true;
-                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11 | (SecurityProtocolType)3072;
-
-                // 1. Ưu tiên tải mẫu VietQR chính thức của Vietcombank
-                string vietQrApiUrl = $"https://img.vietqr.io/image/{BankId}-{AccountNo}-compact2.png?amount={roundedAmount}&addInfo={addInfo}&accountName={accName}";
-
-                using (WebClient wc = new WebClient())
-                {
-                    wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-                    byte[] imgBytes = wc.DownloadData(vietQrApiUrl);
-
-                    // Kiểm tra chắc chắn dữ liệu tải về là file ảnh hợp lệ (tránh trường hợp Cloudflare trả về trang HTML)
-                    if (TrySaveValidImage(imgBytes, tempFilePath))
-                    {
-                        return tempFilePath;
-                    }
-                    throw new Exception("Dữ liệu từ img.vietqr.io không phải là ảnh hợp lệ.");
-                }
-            }
-            catch
-            {
-                try
-                {
-                    // 2. Dự phòng: Tự sinh mã chuẩn Napas247 EMVCo của Vietcombank 9942886521 qua qrserver
-                    string emvPayload = BuildNapas247Payload(roundedAmount, $"Thanh toan {cleanTable}");
-                    string backupQrUrl = $"https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=10&data={Uri.EscapeDataString(emvPayload)}";
-
-                    using (WebClient wc = new WebClient())
-                    {
-                        wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-                        byte[] qrBytes = wc.DownloadData(backupQrUrl);
-
-                        if (qrBytes == null || qrBytes.Length < 200)
-                            throw new Exception("Ảnh QR dự phòng không hợp lệ.");
-
-                        using (MemoryStream ms = new MemoryStream(qrBytes))
-                        using (Image qrImg = Image.FromStream(ms))
-                        using (Bitmap cardBmp = DrawVietcombankCard(qrImg, roundedAmount))
-                        {
-                            cardBmp.Save(tempFilePath, ImageFormat.Png);
-                            return tempFilePath;
-                        }
-                    }
-                }
-                catch
-                {
-                    // 3. Dự phòng Offline: Kiểm tra xem có ảnh VietQR tĩnh lưu sẵn trong thư mục chạy không, nếu không thì tự vẽ QR
-                    Image localQr = TryLoadLocalFallbackQr();
-                    using (Bitmap offlineBmp = DrawVietcombankCard(localQr, roundedAmount))
-                    {
-                        if (localQr != null) localQr.Dispose();
-                        offlineBmp.Save(tempFilePath, ImageFormat.Png);
-                        return tempFilePath;
-                    }
-                }
-            }
-        }
-
-        // Kiểm tra mảng byte có thực sự là ảnh hợp lệ trước khi ghi ra ổ cứng
-        private static bool TrySaveValidImage(byte[] bytes, string savePath)
-        {
-            if (bytes == null || bytes.Length < 500) return false;
-            try
-            {
-                using (MemoryStream ms = new MemoryStream(bytes))
-                using (Image img = Image.FromStream(ms))
-                using (Bitmap bmp = new Bitmap(img))
-                {
-                    bmp.Save(savePath, ImageFormat.Png);
-                    return true;
-                }
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        // Tìm ảnh QR tĩnh trong thư mục bin\Debug (nếu bạn chép ảnh VietQR gốc vào thư mục chạy)
         private static Image TryLoadLocalFallbackQr()
         {
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -295,7 +222,6 @@ namespace QuanLyCafe_Nhom8.Services
                 }
                 else
                 {
-                    // Vẽ ma trận QR mô phỏng khi mất mạng hoàn toàn để khung không bị trống
                     DrawOfflineQrMatrix(g, new Rectangle(65, 78, 230, 230));
                 }
 
@@ -324,7 +250,7 @@ namespace QuanLyCafe_Nhom8.Services
         {
             int gridSize = 21;
             int cellSize = bounds.Width / gridSize;
-            Random rnd = new Random(994288652); // Seed cố định theo STK để hình QR luôn đồng nhất
+            Random rnd = new Random(994288652);
 
             using (SolidBrush black = new SolidBrush(Color.Black))
             using (Pen borderPen = new Pen(Color.FromArgb(0, 107, 63), 2))

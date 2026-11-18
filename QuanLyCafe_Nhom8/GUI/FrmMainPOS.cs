@@ -40,9 +40,6 @@ namespace QuanLyCafe_Nhom8.GUI
 
             LoadAllProducts();
             SwitchChannelTab(Channel.DineIn, reloadFromDb: true);
-
-            // Tự động bật luồng lắng nghe lệnh Telegram 2 chiều (/homnay, /homqua, /ban, /huymon)
-            new TelegramBotService().StartTwoWayListener();
         }
 
         // Lắng nghe sự kiện Realtime từ TCP Server đẩy về (< 1 giây)
@@ -123,13 +120,11 @@ namespace QuanLyCafe_Nhom8.GUI
 
                 string val = cell.Value.ToString().Trim().ToLowerInvariant();
 
-                // Nếu trạng thái đang là nháp / chưa gửi -> chưa gửi pha chế
                 if (val.Contains("nháp") || val.Contains("chưa gửi") || val.Contains("mới gọi") || val.Contains("chờ xác nhận"))
                 {
                     return false;
                 }
 
-                // Nếu trạng thái đã chuyển xuống bếp / pha chế / hoàn thành -> đã gửi pha chế
                 if (val.Contains("đã gửi") || val.Contains("chờ pha") || val.Contains("đang pha") ||
                     val.Contains("đang làm") || val.Contains("hoàn thành") || val.Contains("đã xong") ||
                     val.Contains("pha chế") || val.Contains("đã phục vụ"))
@@ -393,18 +388,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 if (isSentToKitchen)
                 {
                     Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).\nCảnh báo hủy món đã được phát qua Kênh Chat Nội Bộ TCP!", "Đã hủy món");
-                    try
-                    {
-                        new TelegramBotService().GuiTin(
-                            $"⚠️ CẢNH BÁO HỦY MÓN ĐÃ PHA CHẾ:\n" +
-                            $"- Bàn/Đơn: {_selectedTableName}\n" +
-                            $"- Món hủy: {itemName}\n" +
-                            $"- Duyệt bởi: {managerName}\n" +
-                            $"- Thời gian: {DateTime.Now:HH:mm dd/MM/yyyy}");
-                    }
-                    catch { }
-
-                    Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).", "Đã hủy món");
                 }
             }
             catch (Exception ex)
@@ -508,10 +491,10 @@ namespace QuanLyCafe_Nhom8.GUI
                 return;
             }
 
-            // Gọi VietQR API v2 (POST JSON -> Base64ToImage) và hiển thị lên PictureBox
             cboPaymentMethod.SelectedItem = "Chuyển khoản QR";
             LoadQrImageSafe(picVietQR, FinalTotal, _selectedTableName);
         }
+
         private void btnPrintBill_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Chưa có hóa đơn để in!")) return;
@@ -571,7 +554,7 @@ namespace QuanLyCafe_Nhom8.GUI
             }
         }
 
-        private void FrmMainPOS_Load(object sender, EventArgs e)
+        private void FrmMainPOS_Load_1(object sender, EventArgs e)
         {
 
         }

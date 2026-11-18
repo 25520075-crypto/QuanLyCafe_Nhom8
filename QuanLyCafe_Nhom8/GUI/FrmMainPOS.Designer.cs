@@ -37,7 +37,7 @@
             this.ClientSize = new System.Drawing.Size(800, 450);
             this.Name = "FrmMainPOS";
             this.Text = "FrmMainPOS";
-            this.Load += new System.EventHandler(this.FrmMainPOS_Load);
+            this.Load += new System.EventHandler(this.FrmMainPOS_Load_1);
             this.ResumeLayout(false);
 
         }

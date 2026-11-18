@@ -1,75 +1,2351 @@
 ﻿
 
 /* =========================================
-   FILE: Form1.cs 
+   FILE: Program.cs 
 ========================================= */
 
 using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
+using System.Collections.Concurrent;
 using System.Drawing;
-using System.Linq;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using Protocol;
+using CafeServer.DAL;
+using CafeServer.Services;
 
-namespace QuanLyCafe_Nhom8
+namespace CafeServer
 {
-    public partial class Form1 : Form
+    internal class ClientSession
     {
-        public Form1()
+        public string SessionId { get; } = Guid.NewGuid().ToString("N");
+        public TcpClient Client { get; set; }
+        public NetworkStream Stream { get; set; }
+        public SemaphoreSlim SendLock { get; } = new SemaphoreSlim(1, 1);
+        public string Username { get; set; } = "";
+        public string Role { get; set; } = ""; // "Admin" hoặc "Staff"
+        public bool IsAdmin => Role.Equals("Admin", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal class Program
+    {
+        private static readonly ConcurrentDictionary<string, ClientSession> _sessions = new ConcurrentDictionary<string, ClientSession>();
+        private static readonly ConcurrentDictionary<int, object> _tableLocks = new ConcurrentDictionary<int, object>();
+        private static readonly ConcurrentDictionary<string, (string Otp, DateTime Expiry)> _otpStore = new ConcurrentDictionary<string, (string, DateTime)>();
+
+        private static readonly UserDAL _userDal = new UserDAL();
+        private static readonly MenuDAL _menuDal = new MenuDAL();
+        private static readonly PosServiceDAL _posDal = new PosServiceDAL();
+        private static readonly ServerDataAdapter _adapter = new ServerDataAdapter();
+
+        static void Main(string[] args)
         {
-            InitializeComponent();
+            Console.OutputEncoding = Encoding.UTF8;
+            Console.Title = "COFFEE FEFA SERVER - NHÓM 8";
+            Console.WriteLine("=================================================");
+            Console.WriteLine("   COFFEE FEFA TCP/UDP SERVER - NHÓM 8 (UIT)     ");
+            Console.WriteLine("=================================================");
+
+            // Kiểm tra kết nối SQL Server ngay khi khởi động
+            try
+            {
+                var tables = _posDal.GetAllTables();
+                Console.WriteLine($"[SQL] Kết nối CSDL CAFE thành công ({tables.Count} bàn/kênh).");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SQL ERROR] Không kết nối được SQL Server: {ex.Message}");
+            }
+
+            // Chạy UDP Discovery Responder nền
+            Task.Run(() => RunUdpDiscoveryAsync());
+
+            // Chạy TCP Server đa luồng
+            TcpListener listener = new TcpListener(IPAddress.Any, FramingHelper.DefaultTcpPort);
+            listener.Start();
+            Console.WriteLine($"[TCP] Đang lắng nghe tại cổng {FramingHelper.DefaultTcpPort}...");
+            Console.WriteLine($"[UDP] Discovery đang lắng nghe tại cổng {FramingHelper.DefaultUdpPort}...\n");
+
+            while (true)
+            {
+                TcpClient client = listener.AcceptTcpClient();
+                Task.Run(() => HandleClientConnectionAsync(client));
+            }
+        }
+
+        private static async Task RunUdpDiscoveryAsync()
+        {
+            using (UdpClient udp = new UdpClient(FramingHelper.DefaultUdpPort))
+            {
+                while (true)
+                {
+                    try
+                    {
+                        UdpReceiveResult res = await udp.ReceiveAsync();
+                        string msg = Encoding.UTF8.GetString(res.Buffer).Trim();
+                        if (msg == FramingHelper.DiscoveryRequest)
+                        {
+                            byte[] reply = Encoding.UTF8.GetBytes($"{FramingHelper.DiscoveryResponsePrefix}{FramingHelper.DefaultTcpPort}");
+                            await udp.SendAsync(reply, reply.Length, res.RemoteEndPoint);
+                            Console.WriteLine($"[UDP] Phản hồi dò tìm Server tới {res.RemoteEndPoint}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[UDP WARN] {ex.Message}");
+                    }
+                }
+            }
+        }
+
+        private static async Task HandleClientConnectionAsync(TcpClient tcpClient)
+        {
+            var session = new ClientSession
+            {
+                Client = tcpClient,
+                Stream = tcpClient.GetStream()
+            };
+            _sessions[session.SessionId] = session;
+            string remoteIp = tcpClient.Client.RemoteEndPoint?.ToString() ?? "Unknown";
+            Console.WriteLine($"[+] Kết nối mới: {remoteIp} (Session: {session.SessionId.Substring(0, 6)})");
+
+            try
+            {
+                while (tcpClient.Connected)
+                {
+                    PacketMessage req = await FramingHelper.ReceivePacketAsync(session.Stream);
+                    if (req == null) break;
+
+                    PacketMessage res = await ProcessRequestAsync(session, req);
+                    if (res != null)
+                    {
+                        res.RequestId = req.RequestId;
+                        await SendToSessionAsync(session, res);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[!] Ngắt bất thường ({remoteIp}): {ex.Message}");
+            }
+            finally
+            {
+                _sessions.TryRemove(session.SessionId, out _);
+                tcpClient.Close();
+                Console.WriteLine($"[-] Đã ngắt kết nối: {remoteIp}");
+            }
+        }
+
+        private static async Task<PacketMessage> ProcessRequestAsync(ClientSession session, PacketMessage req)
+        {
+            try
+            {
+                JObject data = string.IsNullOrWhiteSpace(req.PayloadJson) ? new JObject() : JObject.Parse(req.PayloadJson);
+
+                switch (req.Type)
+                {
+                    case MsgType.PING:
+                        return new PacketMessage { Type = MsgType.PONG };
+
+                    // ================= AUTH & USER =================
+                    case MsgType.LOGIN_REQ:
+                        {
+                            string u = data["Username"]?.ToString() ?? "";
+                            string p = data["Password"]?.ToString() ?? "";
+                            UserDTO user = _userDal.CheckLogin(u, p);
+                            if (user == null)
+                                return Fail(MsgType.AUTH_FAIL, "AUTH_FAIL", "Sai tên đăng nhập, mật khẩu hoặc tài khoản bị khóa!");
+
+                            session.Username = user.Username;
+                            session.Role = user.Role;
+                            Console.WriteLine($"[AUTH] {user.Username} ({user.Role}) đăng nhập thành công.");
+                            return Ok(MsgType.LOGIN_OK, user);
+                        }
+
+                    case MsgType.FORGOT_SEND_OTP_REQ:
+                        {
+                            string email = data["Email"]?.ToString()?.Trim() ?? "";
+                            if (!_userDal.CheckEmailExist(email))
+                                return Fail(req.Type, "EMAIL_NOT_FOUND", "Gmail này chưa được liên kết với tài khoản nào!");
+
+                            string otp = AuthService.GenerateOTP();
+                            if (!AuthService.SendOtpEmail(email, otp, "Khôi phục mật khẩu", out string err))
+                                return Fail(req.Type, "SMTP_ERROR", err);
+
+                            _otpStore[$"FORGOT:{email.ToLower()}"] = (otp, DateTime.Now.AddMinutes(5));
+                            return Ok(req.Type, new { Sent = true }, "Đã gửi mã OTP qua Gmail!");
+                        }
+
+                    case MsgType.FORGOT_RESET_PASS_REQ:
+                        {
+                            string email = data["Email"]?.ToString()?.Trim() ?? "";
+                            string inputOtp = data["Otp"]?.ToString()?.Trim() ?? "";
+                            string newPass = data["NewPassword"]?.ToString()?.Trim() ?? "";
+
+                            if (!VerifyStoredOtp($"FORGOT:{email.ToLower()}", inputOtp, out string otpErr))
+                                return Fail(req.Type, "INVALID_OTP", otpErr);
+
+                            bool updated = _userDal.UpdatePasswordByEmail(email, newPass);
+                            return updated ? Ok(req.Type, new { Updated = true }) : Fail(req.Type, "DB_ERROR", "Không thể cập nhật mật khẩu.");
+                        }
+
+                    case MsgType.GET_USERS_REQ:
+                        if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin được xem danh sách nhân sự!");
+                        return Ok(req.Type, _adapter.GetAllUsersDto());
+
+                    case MsgType.ADMIN_SEND_CREATE_OTP_REQ:
+                        {
+                            if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin có quyền này!");
+                            string u = data["Username"]?.ToString()?.Trim() ?? "";
+                            string email = data["Email"]?.ToString()?.Trim() ?? "";
+                            if (_userDal.IsUsernameOrEmailExist(u, email))
+                                return Fail(req.Type, "DUPLICATE_USER", "Tên đăng nhập hoặc Gmail đã tồn tại!");
+
+                            string otp = AuthService.GenerateOTP();
+                            if (!AuthService.SendOtpEmail(email, otp, $"Xác thực liên kết tài khoản mới [{u}]", out string err))
+                                return Fail(req.Type, "SMTP_ERROR", err);
+
+                            _otpStore[$"CREATE:{email.ToLower()}"] = (otp, DateTime.Now.AddMinutes(5));
+                            return Ok(req.Type, new { Sent = true });
+                        }
+
+                    case MsgType.ADMIN_CREATE_USER_REQ:
+                        {
+                            if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin có quyền tạo tài khoản!");
+                            string email = data["Email"]?.ToString()?.Trim() ?? "";
+                            string otp = data["Otp"]?.ToString()?.Trim() ?? "";
+                            if (!VerifyStoredOtp($"CREATE:{email.ToLower()}", otp, out string otpErr))
+                                return Fail(req.Type, "INVALID_OTP", otpErr);
+
+                            bool created = _userDal.CreateAccountByAdmin(
+                                data["Username"]?.ToString(),
+                                data["Password"]?.ToString(),
+                                data["FullName"]?.ToString(),
+                                data["Role"]?.ToString(),
+                                email);
+                            return created ? Ok(req.Type, new { Created = true }) : Fail(req.Type, "DB_ERROR", "Tạo tài khoản thất bại.");
+                        }
+
+                    case MsgType.DELETE_USER_REQ:
+                        if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin có quyền xóa nhân viên!");
+                        return Ok(req.Type, new { Deleted = _userDal.DeleteUser(data["DisplayOrderId"].Value<int>()) });
+
+                    case MsgType.TOGGLE_USER_REQ:
+                        if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin có quyền khóa/mở tài khoản!");
+                        return Ok(req.Type, new { Toggled = _userDal.ToggleUserActiveStatus(data["DisplayOrderId"].Value<int>(), data["CurrentStatus"].Value<bool>()) });
+
+                    case MsgType.VERIFY_MANAGER_REQ:
+                        {
+                            bool approved = _posDal.VerifyManagerAccount(data["Username"]?.ToString(), data["Password"]?.ToString(), out string managerName);
+                            return Ok(req.Type, new ManagerVerifyResponseDTO { IsApproved = approved, ManagerFullName = managerName });
+                        }
+
+                    // ================= MENU & CATEGORY =================
+                    case MsgType.GET_CATEGORIES_REQ:
+                        return Ok(req.Type, _adapter.GetAllCategoriesDto());
+
+                    case MsgType.ADD_CATEGORY_REQ:
+                        if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin có quyền thêm danh mục!");
+                        bool catAdded = _menuDal.AddCategory(data["CategoryName"]?.ToString());
+                        if (catAdded) await BroadcastAsync(new PacketMessage { Type = MsgType.MENU_UPDATED });
+                        return Ok(req.Type, new { Added = catAdded });
+
+                    case MsgType.GET_ACTIVE_PRODUCTS_REQ:
+                        return Ok(req.Type, _posDal.GetActiveProducts());
+
+                    case MsgType.GET_ALL_PRODUCTS_REQ:
+                        return Ok(req.Type, _adapter.GetProductsForManagerDto(
+                            data["CategoryId"]?.Value<int>() ?? 0,
+                            data["Keyword"]?.ToString() ?? ""));
+
+                    case MsgType.INSERT_PRODUCT_REQ:
+                        if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin có quyền thêm món!");
+                        bool inserted = _menuDal.InsertProduct(
+                            data["CategoryId"].Value<int>(),
+                            data["ProductName"].ToString(),
+                            data["Price"].Value<decimal>(),
+                            data["ImagePath"]?.ToString() ?? "",
+                            data["IsActive"].Value<bool>());
+                        if (inserted) await BroadcastAsync(new PacketMessage { Type = MsgType.MENU_UPDATED });
+                        return Ok(req.Type, new { Inserted = inserted });
+
+                    case MsgType.UPDATE_PRODUCT_REQ:
+                        if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin có quyền sửa món!");
+                        bool updatedProd = _menuDal.UpdateProduct(
+                            data["ProductId"].Value<int>(),
+                            data["CategoryId"].Value<int>(),
+                            data["ProductName"].ToString(),
+                            data["Price"].Value<decimal>(),
+                            data["ImagePath"]?.ToString() ?? "",
+                            data["IsActive"].Value<bool>());
+                        if (updatedProd) await BroadcastAsync(new PacketMessage { Type = MsgType.MENU_UPDATED });
+                        return Ok(req.Type, new { Updated = updatedProd });
+
+                    case MsgType.TOGGLE_PRODUCT_REQ:
+                        if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin có quyền đổi trạng thái món!");
+                        bool toggledProd = _menuDal.ToggleProductStatus(data["ProductId"].Value<int>(), data["CurrentStatus"].Value<bool>());
+                        if (toggledProd) await BroadcastAsync(new PacketMessage { Type = MsgType.MENU_UPDATED });
+                        return Ok(req.Type, new { Toggled = toggledProd });
+
+                    case MsgType.DELETE_PRODUCT_REQ:
+                        {
+                            if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin có quyền xóa món!");
+                            int prodId = data["ProductId"].Value<int>();
+                            if (_menuDal.IsProductUsedInBills(prodId))
+                                return Fail(req.Type, "PRODUCT_IN_USE", "Món đã từng xuất hiện trong hóa đơn cũ, chỉ có thể chuyển sang Ngừng bán!");
+
+                            bool deletedProd = _menuDal.DeleteProduct(prodId);
+                            if (deletedProd) await BroadcastAsync(new PacketMessage { Type = MsgType.MENU_UPDATED });
+                            return Ok(req.Type, new { Deleted = deletedProd });
+                        }
+
+                    // ================= POS, BÀN, ORDER & THANH TOÁN =================
+                    case MsgType.GET_TABLES_REQ:
+                        return Ok(req.Type, _posDal.GetAllTables());
+
+                    case MsgType.GET_BILL_DETAILS_REQ:
+                        return Ok(req.Type, _adapter.GetBillDetailsByTableDto(data["TableId"].Value<int>()));
+
+                    case MsgType.ADD_ITEM_REQ:
+                        {
+                            int tableId = data["TableId"].Value<int>();
+                            if (!ExecuteWithTableLock(tableId, () => _posDal.AddItemToTable(tableId, data["ProductId"].Value<int>(), data["Quantity"].Value<int>())))
+                                return Fail(MsgType.TABLE_BUSY, "TABLE_BUSY", "Bàn đang được máy khác thao tác, vui lòng thử lại!");
+
+                            await BroadcastAsync(new PacketMessage { Type = MsgType.TABLE_STATUS_CHANGED, PayloadJson = JsonConvert.SerializeObject(new { TableId = tableId }) });
+                            return Ok(req.Type, new { Added = true });
+                        }
+
+                    case MsgType.REMOVE_ITEM_REQ:
+                        {
+                            int tableId = data["TableId"].Value<int>();
+                            int detailId = data["BillDetailId"].Value<int>();
+                            if (!ExecuteWithTableLock(tableId, () => _posDal.RemoveBillDetailItem(detailId, tableId)))
+                                return Fail(MsgType.TABLE_BUSY, "TABLE_BUSY", "Bàn đang được máy khác thao tác!");
+
+                            await BroadcastAsync(new PacketMessage { Type = MsgType.TABLE_STATUS_CHANGED, PayloadJson = JsonConvert.SerializeObject(new { TableId = tableId }) });
+                            return Ok(req.Type, new { Removed = true });
+                        }
+
+                    case MsgType.SEND_KITCHEN_REQ:
+                        {
+                            int tableId = data["TableId"].Value<int>();
+                            int sentCount = _posDal.SendTableOrderToKitchen(tableId);
+                            if (sentCount > 0)
+                            {
+                                await BroadcastAsync(new PacketMessage { Type = MsgType.KDS_NEW_ORDER, PayloadJson = JsonConvert.SerializeObject(new { TableId = tableId, SentCount = sentCount }) });
+                            }
+                            return Ok(req.Type, new { SentCount = sentCount });
+                        }
+
+                    case MsgType.MOVE_TABLE_REQ:
+                        {
+                            int srcId = data["SourceTableId"].Value<int>();
+                            int dstId = data["TargetTableId"].Value<int>();
+                            if (!ExecuteWithDualTableLock(srcId, dstId, () => _posDal.MoveToEmptyTable(srcId, dstId)))
+                                return Fail(MsgType.TABLE_BUSY, "TABLE_BUSY", "Một trong hai bàn đang được máy khác thao tác!");
+
+                            await BroadcastAsync(new PacketMessage { Type = MsgType.TABLE_STATUS_CHANGED, PayloadJson = JsonConvert.SerializeObject(new { TableId = dstId }) });
+                            return Ok(req.Type, new { Moved = true });
+                        }
+
+                    case MsgType.MERGE_TABLE_REQ:
+                        {
+                            int srcId = data["SourceTableId"].Value<int>();
+                            int dstId = data["TargetTableId"].Value<int>();
+                            if (!ExecuteWithDualTableLock(srcId, dstId, () => _posDal.MergeOccupiedTables(srcId, dstId)))
+                                return Fail(MsgType.TABLE_BUSY, "TABLE_BUSY", "Một trong hai bàn đang được máy khác thao tác!");
+
+                            await BroadcastAsync(new PacketMessage { Type = MsgType.TABLE_STATUS_CHANGED, PayloadJson = JsonConvert.SerializeObject(new { TableId = dstId }) });
+                            return Ok(req.Type, new { Merged = true });
+                        }
+
+                    case MsgType.GET_VIETQR_REQ:
+                        {
+                            decimal amount = data["Amount"].Value<decimal>();
+                            string tableName = data["TableName"]?.ToString() ?? "";
+                            using (Bitmap bmp = SmartPaymentService.GetQrBitmap(amount, tableName))
+                            using (MemoryStream ms = new MemoryStream())
+                            {
+                                bmp.Save(ms, ImageFormat.Png);
+                                string b64 = Convert.ToBase64String(ms.ToArray());
+                                return Ok(req.Type, new QrResponseDTO { Base64Png = b64 });
+                            }
+                        }
+
+                    case MsgType.CHECKOUT_REQ:
+                        {
+                            int tableId = data["TableId"].Value<int>();
+                            int discount = data["DiscountPercent"].Value<int>();
+                            string method = data["PaymentMethod"]?.ToString() ?? "Tiền mặt";
+
+                            bool success = false;
+                            decimal finalAmt = 0;
+                            if (!ExecuteWithTableLock(tableId, () =>
+                            {
+                                success = _posDal.CheckoutTable(tableId, discount, method, out finalAmt);
+                            }))
+                            {
+                                return Fail(MsgType.TABLE_BUSY, "TABLE_BUSY", "Bàn đang được máy khác thanh toán!");
+                            }
+
+                            if (success)
+                            {
+                                await BroadcastAsync(new PacketMessage { Type = MsgType.TABLE_STATUS_CHANGED, PayloadJson = JsonConvert.SerializeObject(new { TableId = tableId }) });
+                            }
+                            return Ok(req.Type, new CheckoutResponseDTO { IsSuccess = success, TableId = tableId, FinalAmount = finalAmt });
+                        }
+
+                    // ================= KDS & THỐNG KÊ =================
+                    case MsgType.GET_PENDING_KDS_REQ:
+                        return Ok(req.Type, _adapter.GetPendingKitchenItemsDto());
+
+                    case MsgType.KDS_COMPLETE_ITEM_REQ:
+                        {
+                            int detailId = data["BillDetailId"].Value<int>();
+                            _posDal.MarkKitchenItemDone(detailId);
+                            await BroadcastAsync(new PacketMessage { Type = MsgType.KDS_ITEM_DONE, PayloadJson = JsonConvert.SerializeObject(new { BillDetailId = detailId }) });
+                            return Ok(req.Type, new { Done = true });
+                        }
+
+                    case MsgType.STATS_REVENUE_REQ:
+                        {
+                            if (!session.IsAdmin) return Fail(MsgType.PERMISSION_DENIED, "PERMISSION_DENIED", "Chỉ Admin được xem thống kê doanh thu!");
+                            DateTime from = DateTime.Parse(data["FromDate"].ToString());
+                            DateTime to = DateTime.Parse(data["ToDate"].ToString());
+                            return Ok(req.Type, _adapter.GetRevenueStats(from, to));
+                        }
+
+                    default:
+                        return Fail(MsgType.ERROR, "UNKNOWN_MSG", $"Không hỗ trợ gói tin {req.Type}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERR] Xử lý {req.Type}: {ex.Message}");
+                return Fail(MsgType.ERROR, "SERVER_EXCEPTION", ex.Message);
+            }
+        }
+
+        // Khóa đồng thời theo TableId chống 2 máy đặt/thanh toán trùng bàn
+        private static bool ExecuteWithTableLock(int tableId, Action action)
+        {
+            object lockObj = _tableLocks.GetOrAdd(tableId, _ => new object());
+            if (!Monitor.TryEnter(lockObj, 500)) return false;
+            try
+            {
+                action();
+                return true;
+            }
+            finally
+            {
+                Monitor.Exit(lockObj);
+            }
+        }
+
+        // Khóa 2 bàn theo thứ tự ID tăng dần để tránh Deadlock khi chuyển/gộp bàn
+        private static bool ExecuteWithDualTableLock(int id1, int id2, Action action)
+        {
+            int first = Math.Min(id1, id2);
+            int second = Math.Max(id1, id2);
+            object lock1 = _tableLocks.GetOrAdd(first, _ => new object());
+            object lock2 = _tableLocks.GetOrAdd(second, _ => new object());
+
+            if (!Monitor.TryEnter(lock1, 500)) return false;
+            try
+            {
+                if (!Monitor.TryEnter(lock2, 500)) return false;
+                try
+                {
+                    action();
+                    return true;
+                }
+                finally
+                {
+                    Monitor.Exit(lock2);
+                }
+            }
+            finally
+            {
+                Monitor.Exit(lock1);
+            }
+        }
+
+        private static bool VerifyStoredOtp(string key, string inputOtp, out string error)
+        {
+            error = "";
+            if (!_otpStore.TryGetValue(key, out var entry))
+            {
+                error = "Chưa yêu cầu mã OTP hoặc mã đã được sử dụng!";
+                return false;
+            }
+            if (DateTime.Now > entry.Expiry)
+            {
+                _otpStore.TryRemove(key, out _);
+                error = "Mã OTP đã hết hạn (quá 5 phút)!";
+                return false;
+            }
+            if (entry.Otp != inputOtp)
+            {
+                error = "Mã OTP không chính xác!";
+                return false;
+            }
+            _otpStore.TryRemove(key, out _);
+            return true;
+        }
+
+        private static PacketMessage Ok(MsgType type, object payload, string msg = "") =>
+            new PacketMessage { Type = type, Success = true, PayloadJson = JsonConvert.SerializeObject(payload), Message = msg };
+
+        private static PacketMessage Fail(MsgType type, string code, string msg) =>
+            new PacketMessage { Type = type, Success = false, ErrorCode = code, Message = msg };
+
+        private static async Task SendToSessionAsync(ClientSession session, PacketMessage packet)
+        {
+            await session.SendLock.WaitAsync();
+            try
+            {
+                if (session.Client.Connected)
+                    await FramingHelper.SendPacketAsync(session.Stream, packet);
+            }
+            finally
+            {
+                session.SendLock.Release();
+            }
+        }
+
+        private static async Task BroadcastAsync(PacketMessage packet)
+        {
+            foreach (var kv in _sessions)
+            {
+                await SendToSessionAsync(kv.Value, packet);
+            }
         }
     }
 }
 
 
 /* =========================================
-   FILE: Form1.Designer.cs 
+   FILE: DatabaseHelper.cs 
 ========================================= */
 
-namespace QuanLyCafe_Nhom8
+using System;
+using System.Data;
+using System.Data.SqlClient;
+
+namespace CafeServer.DAL
 {
-    partial class Form1
+    public static class DatabaseHelper
     {
-        /// <summary>
-        /// Required designer variable.
-        /// </summary>
-        private System.ComponentModel.IContainer components = null;
+        public static string ConnectionString = "Data Source=.;Initial Catalog=CAFE;Integrated Security=True;TrustServerCertificate=True";
 
-        /// <summary>
-        /// Clean up any resources being used.
-        /// </summary>
-        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
-        protected override void Dispose(bool disposing)
+        public static SqlConnection GetConnection()
         {
-            if (disposing && (components != null))
+            return new SqlConnection(ConnectionString);
+        }
+
+        public static DataTable ExecuteQuery(string query, SqlParameter[] parameters = null)
+        {
+            using (SqlConnection conn = GetConnection())
             {
-                components.Dispose();
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    if (parameters != null)
+                    {
+                        cmd.Parameters.AddRange(parameters);
+                    }
+                    using (SqlDataAdapter adapter = new SqlDataAdapter(cmd))
+                    {
+                        DataTable dt = new DataTable();
+                        adapter.Fill(dt);
+                        return dt;
+                    }
+                }
             }
-            base.Dispose(disposing);
         }
 
-        #region Windows Form Designer generated code
-
-        /// <summary>
-        /// Required method for Designer support - do not modify
-        /// the contents of this method with the code editor.
-        /// </summary>
-        private void InitializeComponent()
+        public static int ExecuteNonQuery(string query, SqlParameter[] parameters = null)
         {
-            this.components = new System.ComponentModel.Container();
-            this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
-            this.ClientSize = new System.Drawing.Size(800, 450);
-            this.Text = "Form1";
+            using (SqlConnection conn = GetConnection())
+            {
+                conn.Open();
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    if (parameters != null)
+                    {
+                        cmd.Parameters.AddRange(parameters);
+                    }
+                    return cmd.ExecuteNonQuery();
+                }
+            }
         }
 
-        #endregion
+        public static object ExecuteScalar(string query, SqlParameter[] parameters = null)
+        {
+            using (SqlConnection conn = GetConnection())
+            {
+                conn.Open();
+                using (SqlCommand cmd = new SqlCommand(query, conn))
+                {
+                    if (parameters != null)
+                    {
+                        cmd.Parameters.AddRange(parameters);
+                    }
+                    return cmd.ExecuteScalar();
+                }
+            }
+        }
     }
 }
 
+
+/* =========================================
+   FILE: MenuDAL.cs 
+========================================= */
+
+using System;
+using System.Data;
+using System.Data.SqlClient;
+
+namespace CafeServer.DAL
+{
+    public class MenuDAL
+    {
+        public MenuDAL()
+        {
+            EnsureCategoriesSeeded();
+        }
+
+        // Đảm bảo bảng Categories luôn có sẵn các danh mục mặc định nếu DB mới tạo
+        private void EnsureCategoriesSeeded()
+        {
+            try
+            {
+                string sql = @"
+                    IF OBJECT_ID('dbo.Categories', 'U') IS NULL
+                    BEGIN
+                        CREATE TABLE dbo.Categories (
+                            CategoryId INT IDENTITY(1,1) PRIMARY KEY,
+                            CategoryName NVARCHAR(100) NOT NULL
+                        );
+                    END
+
+                    IF NOT EXISTS (SELECT 1 FROM dbo.Categories)
+                    BEGIN
+                        INSERT INTO dbo.Categories (CategoryName) VALUES
+                        (N'Cà phê truyền thống'),
+                        (N'Trà trái cây & Macchiato'),
+                        (N'Đá xay & Freeze'),
+                        (N'Bánh ngọt & Topping');
+                    END";
+                DatabaseHelper.ExecuteNonQuery(sql);
+            }
+            catch
+            {
+                // Bỏ qua nếu bảng đã có sẵn dữ liệu
+            }
+        }
+
+        // Lấy toàn bộ danh mục thực đơn
+        public DataTable GetAllCategories()
+        {
+            return DatabaseHelper.ExecuteQuery("SELECT CategoryId, CategoryName FROM Categories ORDER BY CategoryId ASC");
+        }
+
+        // Thêm nhanh 1 danh mục mới
+        public bool AddCategory(string categoryName)
+        {
+            string query = "INSERT INTO Categories (CategoryName) VALUES (@Name)";
+            SqlParameter[] prms = { new SqlParameter("@Name", categoryName.Trim()) };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Lấy danh sách món ăn kèm số thứ tự liên tục (ROW_NUMBER) để không bị nhảy số khi xóa
+        public DataTable GetProductsForManager(int categoryId = 0, string keyword = "")
+        {
+            string query = @"
+                SELECT 
+                    ROW_NUMBER() OVER (ORDER BY p.ProductId ASC) AS [STT],
+                    p.ProductId,
+                    p.CategoryId,
+                    p.ProductName AS [Tên món nước],
+                    ISNULL(c.CategoryName, N'Chưa phân loại') AS [Danh mục],
+                    p.Price AS [Đơn giá (VNĐ)],
+                    p.IsActive AS [Đang bán],
+                    ISNULL(p.ImagePath, '') AS [ImagePath]
+                FROM Products p
+                LEFT JOIN Categories c ON p.CategoryId = c.CategoryId
+                WHERE (@CatId = 0 OR p.CategoryId = @CatId)
+                  AND (@Kw = N'' OR p.ProductName LIKE N'%' + @Kw + N'%')
+                ORDER BY p.ProductId ASC";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@CatId", categoryId),
+                new SqlParameter("@Kw", keyword.Trim())
+            };
+            return DatabaseHelper.ExecuteQuery(query, prms);
+        }
+
+        // Thêm món mới
+        public bool InsertProduct(int categoryId, string name, decimal price, string imagePath, bool isActive)
+        {
+            string query = @"
+                INSERT INTO Products (CategoryId, ProductName, Price, ImagePath, IsActive)
+                VALUES (@CatId, @Name, @Price, @Img, @Active)";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@CatId", categoryId),
+                new SqlParameter("@Name", name.Trim()),
+                new SqlParameter("@Price", price),
+                new SqlParameter("@Img", string.IsNullOrEmpty(imagePath) ? (object)DBNull.Value : imagePath),
+                new SqlParameter("@Active", isActive)
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Cập nhật thông tin món
+        public bool UpdateProduct(int productId, int categoryId, string name, decimal price, string imagePath, bool isActive)
+        {
+            string query = @"
+                UPDATE Products
+                SET CategoryId = @CatId,
+                    ProductName = @Name,
+                    Price = @Price,
+                    ImagePath = @Img,
+                    IsActive = @Active
+                WHERE ProductId = @Id";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@CatId", categoryId),
+                new SqlParameter("@Name", name.Trim()),
+                new SqlParameter("@Price", price),
+                new SqlParameter("@Img", string.IsNullOrEmpty(imagePath) ? (object)DBNull.Value : imagePath),
+                new SqlParameter("@Active", isActive),
+                new SqlParameter("@Id", productId)
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Đổi nhanh trạng thái Đang bán / Ngừng bán
+        public bool ToggleProductStatus(int productId, bool currentStatus)
+        {
+            string query = "UPDATE Products SET IsActive = @NewStatus WHERE ProductId = @Id";
+            SqlParameter[] prms = {
+                new SqlParameter("@NewStatus", !currentStatus),
+                new SqlParameter("@Id", productId)
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Kiểm tra xem món đã từng xuất hiện trong hóa đơn (BillDetails) chưa
+        public bool IsProductUsedInBills(int productId)
+        {
+            string query = "SELECT COUNT(1) FROM BillDetails WHERE ProductId = @Id";
+            SqlParameter[] prms = { new SqlParameter("@Id", productId) };
+            int count = Convert.ToInt32(DatabaseHelper.ExecuteScalar(query, prms));
+            return count > 0;
+        }
+
+        // Xóa món và tự động Reseed lại ID trong bảng Products
+        public bool DeleteProduct(int productId)
+        {
+            string query = @"
+                DELETE FROM Products WHERE ProductId = @Id;
+                DECLARE @MaxId INT = ISNULL((SELECT MAX(ProductId) FROM Products), 0);
+                DBCC CHECKIDENT ('Products', RESEED, @MaxId);";
+
+            SqlParameter[] prms = { new SqlParameter("@Id", productId) };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: PosServiceDAL.cs 
+========================================= */
+
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using System.Security.Cryptography;
+using System.Text;
+using Protocol;
+
+namespace CafeServer.DAL
+{
+    public class PosServiceDAL
+    {
+        // Hàm khởi tạo: Tự động kiểm tra và bổ sung các kênh bán hàng (Mang về, Shopee, XanhSM, Grab) và cột PaymentMethod nếu DB cũ chưa có
+        public PosServiceDAL()
+        {
+            EnsureOrderChannelsAndColumnsSeeded();
+        }
+
+        // Tự động nâng cấp bảng Tables và Bills an toàn mà không cần xóa Database cũ
+        public void EnsureOrderChannelsAndColumnsSeeded()
+        {
+            string sql = @"
+                -- Tự động thêm cột PaymentMethod (Phương thức thanh toán) vào bảng Bills nếu chưa có
+                IF COL_LENGTH('dbo.Bills', 'PaymentMethod') IS NULL
+                BEGIN
+                    ALTER TABLE dbo.Bills ADD PaymentMethod NVARCHAR(50) NULL DEFAULT N'Tiền mặt';
+                END
+
+                -- Tự động thêm các bàn Mua mang về nếu chưa có
+                IF NOT EXISTS (SELECT 1 FROM Tables WHERE TableName LIKE N'Mang về%')
+                BEGIN
+                    INSERT INTO Tables (TableName, Status) VALUES
+                    (N'Mang về 01', N'Trống'),
+                    (N'Mang về 02', N'Trống'),
+                    (N'Mang về 03', N'Trống'),
+                    (N'Mang về 04', N'Trống');
+                END
+
+                -- Tự động thêm các đơn ShopeeFood và XanhSM nếu chưa có
+                IF NOT EXISTS (SELECT 1 FROM Tables WHERE TableName LIKE N'Shopee%' OR TableName LIKE N'XanhSM%')
+                BEGIN
+                    INSERT INTO Tables (TableName, Status) VALUES
+                    (N'ShopeeFood 01', N'Trống'),
+                    (N'ShopeeFood 02', N'Trống'),
+                    (N'ShopeeFood 03', N'Trống'),
+                    (N'XanhSM 01', N'Trống'),
+                    (N'XanhSM 02', N'Trống'),
+                    (N'XanhSM 03', N'Trống');
+                END
+
+                -- Tự động thêm các đơn GrabFood nếu chưa có
+                IF NOT EXISTS (SELECT 1 FROM Tables WHERE TableName LIKE N'GrabFood%')
+                BEGIN
+                    INSERT INTO Tables (TableName, Status) VALUES
+                    (N'GrabFood 01', N'Trống'),
+                    (N'GrabFood 02', N'Trống'),
+                    (N'GrabFood 03', N'Trống'),
+                    (N'GrabFood 04', N'Trống');
+                END";
+            DatabaseHelper.ExecuteNonQuery(sql);
+        }
+
+        // Hàm băm mật khẩu sang chuỗi SHA-256 để kiểm tra quyền Quản lý (Admin)
+        public static string ComputeSha256(string rawText)
+        {
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(rawText));
+                StringBuilder sb = new StringBuilder();
+                foreach (byte b in bytes)
+                {
+                    sb.Append(b.ToString("x2"));
+                }
+                return sb.ToString();
+            }
+        }
+
+        // Kiểm tra tài khoản Quản lý (Admin) khi thực hiện thao tác nhạy cảm: Hủy món hoặc Giảm giá
+        public bool VerifyManagerAccount(string username, string password, out string managerFullName)
+        {
+            managerFullName = "";
+            string hash = ComputeSha256(password);
+            string query = @"
+                SELECT FullName, Role 
+                FROM Users 
+                WHERE Username = @User AND (PasswordHash = @Hash OR PasswordHash = @Raw) AND IsActive = 1";
+            DataTable dt = DatabaseHelper.ExecuteQuery(query, new SqlParameter[]
+            {
+                new SqlParameter("@User", username.Trim()),
+                new SqlParameter("@Hash", hash),
+                new SqlParameter("@Raw", password.Trim())
+            });
+
+            // Hỗ trợ tài khoản admin mặc định khi chạy demo
+            if (dt.Rows.Count == 0)
+            {
+                if (username.Trim().Equals("admin", StringComparison.OrdinalIgnoreCase) && password == "admin123")
+                {
+                    managerFullName = "Duy Anh (Quản lý)";
+                    return true;
+                }
+                return false;
+            }
+
+            string role = dt.Rows[0]["Role"].ToString();
+            managerFullName = dt.Rows[0]["FullName"].ToString();
+            return role.Equals("Admin", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Lấy toàn bộ danh sách Bàn / Đơn từ bảng Tables
+        public List<TableDTO> GetAllTables()
+        {
+            List<TableDTO> list = new List<TableDTO>();
+            DataTable dt = DatabaseHelper.ExecuteQuery("SELECT TableId, TableName, Status FROM Tables ORDER BY TableId");
+            foreach (DataRow row in dt.Rows)
+            {
+                list.Add(new TableDTO
+                {
+                    TableId = Convert.ToInt32(row["TableId"]),
+                    TableName = row["TableName"].ToString(),
+                    Status = row["Status"].ToString()
+                });
+            }
+            return list;
+        }
+
+        // Tìm thông tin 1 bàn theo mã TableId
+        public TableDTO GetTableById(int tableId)
+        {
+            DataTable dt = DatabaseHelper.ExecuteQuery("SELECT TableId, TableName, Status FROM Tables WHERE TableId = @Id",
+                new SqlParameter[] { new SqlParameter("@Id", tableId) });
+            if (dt.Rows.Count == 0) return null;
+            return new TableDTO
+            {
+                TableId = Convert.ToInt32(dt.Rows[0]["TableId"]),
+                TableName = dt.Rows[0]["TableName"].ToString(),
+                Status = dt.Rows[0]["Status"].ToString()
+            };
+        }
+
+        // Lấy danh sách các món nước đang mở bán (IsActive = 1)
+        public List<ProductDTO> GetActiveProducts()
+        {
+            List<ProductDTO> list = new List<ProductDTO>();
+            DataTable dt = DatabaseHelper.ExecuteQuery("SELECT ProductId, CategoryId, ProductName, Price, ImagePath FROM Products WHERE IsActive = 1");
+            foreach (DataRow row in dt.Rows)
+            {
+                list.Add(new ProductDTO
+                {
+                    ProductId = Convert.ToInt32(row["ProductId"]),
+                    CategoryId = Convert.ToInt32(row["CategoryId"]),
+                    ProductName = row["ProductName"].ToString(),
+                    Price = Convert.ToDecimal(row["Price"]),
+                    ImagePath = row["ImagePath"] == DBNull.Value ? "" : row["ImagePath"].ToString()
+                });
+            }
+            return list;
+        }
+
+        // Lấy danh sách các món khách đã gọi tại bàn đang chọn (chỉ lấy hóa đơn chưa thanh toán Status = 0)
+        public DataTable GetBillDetailsByTable(int tableId)
+        {
+            string query = @"
+                SELECT bd.BillDetailId, p.ProductName AS [Tên món], bd.Quantity AS [SL], bd.UnitPrice AS [Đơn giá], 
+                       (bd.Quantity * bd.UnitPrice) AS [Thành tiền], bd.KitchenStatus AS [Trạng thái]
+                FROM BillDetails bd
+                INNER JOIN Bills b ON bd.BillId = b.BillId
+                INNER JOIN Products p ON bd.ProductId = p.ProductId
+                WHERE b.TableId = @TableId AND b.Status = 0";
+            return DatabaseHelper.ExecuteQuery(query, new SqlParameter[] { new SqlParameter("@TableId", tableId) });
+        }
+
+        // Thêm món vào bàn với trạng thái ban đầu là 'Chờ xác nhận' (Order nháp để đọc lại cho khách trước khi gửi pha chế)
+        public void AddItemToTable(int tableId, int productId, int quantity)
+        {
+            using (SqlConnection conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                // Sử dụng SqlTransaction để đảm bảo toàn vẹn dữ liệu khi vừa tạo Bill vừa thêm BillDetails
+                using (SqlTransaction trans = conn.BeginTransaction())
+                {
+                    try
+                    {
+                        int billId = -1;
+                        using (SqlCommand cmdCheckBill = new SqlCommand("SELECT TOP 1 BillId FROM Bills WHERE TableId = @TableId AND Status = 0", conn, trans))
+                        {
+                            cmdCheckBill.Parameters.AddWithValue("@TableId", tableId);
+                            object res = cmdCheckBill.ExecuteScalar();
+                            if (res != null && res != DBNull.Value)
+                            {
+                                billId = Convert.ToInt32(res);
+                            }
+                        }
+
+                        // Nếu bàn chưa có hóa đơn thì tạo hóa đơn mới và đổi trạng thái bàn sang 'Có khách'
+                        if (billId == -1)
+                        {
+                            using (SqlCommand cmdCreateBill = new SqlCommand("INSERT INTO Bills (TableId, CheckInTime, Status) OUTPUT INSERTED.BillId VALUES (@TableId, GETDATE(), 0)", conn, trans))
+                            {
+                                cmdCreateBill.Parameters.AddWithValue("@TableId", tableId);
+                                billId = Convert.ToInt32(cmdCreateBill.ExecuteScalar());
+                            }
+
+                            using (SqlCommand cmdUpdateTable = new SqlCommand("UPDATE Tables SET Status = N'Có khách' WHERE TableId = @TableId", conn, trans))
+                            {
+                                cmdUpdateTable.Parameters.AddWithValue("@TableId", tableId);
+                                cmdUpdateTable.ExecuteNonQuery();
+                            }
+                        }
+
+                        decimal unitPrice = 0;
+                        using (SqlCommand cmdPrice = new SqlCommand("SELECT Price FROM Products WHERE ProductId = @ProductId", conn, trans))
+                        {
+                            cmdPrice.Parameters.AddWithValue("@ProductId", productId);
+                            unitPrice = Convert.ToDecimal(cmdPrice.ExecuteScalar());
+                        }
+
+                        // Kiểm tra xem món đó đã có ở trạng thái 'Chờ xác nhận' chưa, nếu có thì cộng dồn số lượng
+                        int existingDraftDetailId = -1;
+                        using (SqlCommand cmdCheckItem = new SqlCommand("SELECT TOP 1 BillDetailId FROM BillDetails WHERE BillId = @BillId AND ProductId = @ProductId AND KitchenStatus = N'Chờ xác nhận'", conn, trans))
+                        {
+                            cmdCheckItem.Parameters.AddWithValue("@BillId", billId);
+                            cmdCheckItem.Parameters.AddWithValue("@ProductId", productId);
+                            object detailObj = cmdCheckItem.ExecuteScalar();
+                            if (detailObj != null && detailObj != DBNull.Value)
+                            {
+                                existingDraftDetailId = Convert.ToInt32(detailObj);
+                            }
+                        }
+
+                        if (existingDraftDetailId != -1)
+                        {
+                            using (SqlCommand cmdUpdateDetail = new SqlCommand("UPDATE BillDetails SET Quantity = Quantity + @Quantity WHERE BillDetailId = @BillDetailId", conn, trans))
+                            {
+                                cmdUpdateDetail.Parameters.AddWithValue("@Quantity", quantity);
+                                cmdUpdateDetail.Parameters.AddWithValue("@BillDetailId", existingDraftDetailId);
+                                cmdUpdateDetail.ExecuteNonQuery();
+                            }
+                        }
+                        else
+                        {
+                            using (SqlCommand cmdInsertDetail = new SqlCommand("INSERT INTO BillDetails (BillId, ProductId, Quantity, UnitPrice, KitchenStatus) VALUES (@BillId, @ProductId, @Quantity, @UnitPrice, N'Chờ xác nhận')", conn, trans))
+                            {
+                                cmdInsertDetail.Parameters.AddWithValue("@BillId", billId);
+                                cmdInsertDetail.Parameters.AddWithValue("@ProductId", productId);
+                                cmdInsertDetail.Parameters.AddWithValue("@Quantity", quantity);
+                                cmdInsertDetail.Parameters.AddWithValue("@UnitPrice", unitPrice);
+                                cmdInsertDetail.ExecuteNonQuery();
+                            }
+                        }
+
+                        // Cập nhật lại tổng tiền của hóa đơn
+                        using (SqlCommand cmdUpdateTotal = new SqlCommand("UPDATE Bills SET TotalAmount = (SELECT ISNULL(SUM(Quantity * UnitPrice), 0) FROM BillDetails WHERE BillId = @BillId) WHERE BillId = @BillId", conn, trans))
+                        {
+                            cmdUpdateTotal.Parameters.AddWithValue("@BillId", billId);
+                            cmdUpdateTotal.ExecuteNonQuery();
+                        }
+
+                        trans.Commit();
+                    }
+                    catch
+                    {
+                        trans.Rollback();
+                        throw;
+                    }
+                }
+            }
+        }
+
+        // Chuyển các món từ 'Chờ xác nhận' sang 'Chờ pha chế' để hiển thị lên màn hình Quầy Bar (KDS)
+        public int SendTableOrderToKitchen(int tableId)
+        {
+            string query = @"
+                UPDATE bd
+                SET bd.KitchenStatus = N'Chờ pha chế'
+                FROM BillDetails bd
+                INNER JOIN Bills b ON bd.BillId = b.BillId
+                WHERE b.TableId = @TableId AND b.Status = 0 AND bd.KitchenStatus = N'Chờ xác nhận'";
+            return DatabaseHelper.ExecuteNonQuery(query, new SqlParameter[] { new SqlParameter("@TableId", tableId) });
+        }
+
+        // Hủy 1 món khỏi hóa đơn (Lệnh DELETE này sẽ tự động kích hoạt Trigger trg_AuditBillDetailDelete trong SQL)
+        public void RemoveBillDetailItem(int billDetailId, int tableId)
+        {
+            using (SqlConnection conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                using (SqlTransaction trans = conn.BeginTransaction())
+                {
+                    try
+                    {
+                        int billId = -1;
+                        using (SqlCommand cmdGetBill = new SqlCommand("SELECT BillId FROM BillDetails WHERE BillDetailId = @DetailId", conn, trans))
+                        {
+                            cmdGetBill.Parameters.AddWithValue("@DetailId", billDetailId);
+                            object obj = cmdGetBill.ExecuteScalar();
+                            if (obj != null && obj != DBNull.Value)
+                            {
+                                billId = Convert.ToInt32(obj);
+                            }
+                        }
+
+                        if (billId == -1) return;
+
+                        using (SqlCommand cmdDelete = new SqlCommand("DELETE FROM BillDetails WHERE BillDetailId = @DetailId", conn, trans))
+                        {
+                            cmdDelete.Parameters.AddWithValue("@DetailId", billDetailId);
+                            cmdDelete.ExecuteNonQuery();
+                        }
+
+                        int remainingCount = 0;
+                        using (SqlCommand cmdCount = new SqlCommand("SELECT COUNT(*) FROM BillDetails WHERE BillId = @BillId", conn, trans))
+                        {
+                            cmdCount.Parameters.AddWithValue("@BillId", billId);
+                            remainingCount = Convert.ToInt32(cmdCount.ExecuteScalar());
+                        }
+
+                        // Nếu hủy hết sạch các món trong bàn thì xóa hóa đơn rỗng và trả bàn về trạng thái 'Trống'
+                        if (remainingCount == 0)
+                        {
+                            using (SqlCommand cmdDelBill = new SqlCommand("DELETE FROM Bills WHERE BillId = @BillId", conn, trans))
+                            {
+                                cmdDelBill.Parameters.AddWithValue("@BillId", billId);
+                                cmdDelBill.ExecuteNonQuery();
+                            }
+
+                            using (SqlCommand cmdFreeTable = new SqlCommand("UPDATE Tables SET Status = N'Trống' WHERE TableId = @TableId", conn, trans))
+                            {
+                                cmdFreeTable.Parameters.AddWithValue("@TableId", tableId);
+                                cmdFreeTable.ExecuteNonQuery();
+                            }
+                        }
+                        else
+                        {
+                            using (SqlCommand cmdUpdateTotal = new SqlCommand("UPDATE Bills SET TotalAmount = (SELECT ISNULL(SUM(Quantity * UnitPrice), 0) FROM BillDetails WHERE BillId = @BillId) WHERE BillId = @BillId", conn, trans))
+                            {
+                                cmdUpdateTotal.Parameters.AddWithValue("@BillId", billId);
+                                cmdUpdateTotal.ExecuteNonQuery();
+                            }
+                        }
+
+                        trans.Commit();
+                    }
+                    catch
+                    {
+                        trans.Rollback();
+                        throw;
+                    }
+                }
+            }
+        }
+
+        // Nghiệp vụ CHUYỂN BÀN: Đổi khách từ bàn hiện tại sang một bàn đang TRỐNG
+        public void MoveToEmptyTable(int sourceTableId, int targetTableId)
+        {
+            using (SqlConnection conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                using (SqlTransaction trans = conn.BeginTransaction())
+                {
+                    try
+                    {
+                        using (SqlCommand cmdMoveBill = new SqlCommand("UPDATE Bills SET TableId = @TargetTableId WHERE TableId = @SourceTableId AND Status = 0", conn, trans))
+                        {
+                            cmdMoveBill.Parameters.AddWithValue("@TargetTableId", targetTableId);
+                            cmdMoveBill.Parameters.AddWithValue("@SourceTableId", sourceTableId);
+                            cmdMoveBill.ExecuteNonQuery();
+                        }
+
+                        using (SqlCommand cmdFreeSource = new SqlCommand("UPDATE Tables SET Status = N'Trống' WHERE TableId = @SourceTableId", conn, trans))
+                        {
+                            cmdFreeSource.Parameters.AddWithValue("@SourceTableId", sourceTableId);
+                            cmdFreeSource.ExecuteNonQuery();
+                        }
+
+                        using (SqlCommand cmdOccupyTarget = new SqlCommand("UPDATE Tables SET Status = N'Có khách' WHERE TableId = @TargetTableId", conn, trans))
+                        {
+                            cmdOccupyTarget.Parameters.AddWithValue("@TargetTableId", targetTableId);
+                            cmdOccupyTarget.ExecuteNonQuery();
+                        }
+
+                        trans.Commit();
+                    }
+                    catch
+                    {
+                        trans.Rollback();
+                        throw;
+                    }
+                }
+            }
+        }
+
+        // Nghiệp vụ GỘP BÀN: Dồn toàn bộ món của bàn nguồn vào bàn đích (cả 2 bàn đều đang CÓ KHÁCH)
+        public void MergeOccupiedTables(int sourceTableId, int targetTableId)
+        {
+            using (SqlConnection conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                using (SqlTransaction trans = conn.BeginTransaction())
+                {
+                    try
+                    {
+                        int sourceBillId = -1;
+                        int targetBillId = -1;
+
+                        using (SqlCommand cmdSource = new SqlCommand("SELECT TOP 1 BillId FROM Bills WHERE TableId = @TableId AND Status = 0", conn, trans))
+                        {
+                            cmdSource.Parameters.AddWithValue("@TableId", sourceTableId);
+                            object res = cmdSource.ExecuteScalar();
+                            if (res != null && res != DBNull.Value) sourceBillId = Convert.ToInt32(res);
+                        }
+
+                        using (SqlCommand cmdTarget = new SqlCommand("SELECT TOP 1 BillId FROM Bills WHERE TableId = @TableId AND Status = 0", conn, trans))
+                        {
+                            cmdTarget.Parameters.AddWithValue("@TableId", targetTableId);
+                            object res = cmdTarget.ExecuteScalar();
+                            if (res != null && res != DBNull.Value) targetBillId = Convert.ToInt32(res);
+                        }
+
+                        if (sourceBillId == -1 || targetBillId == -1) return;
+
+                        // Chuyển toàn bộ các dòng món sang hóa đơn của bàn đích
+                        using (SqlCommand cmdMoveDetails = new SqlCommand("UPDATE BillDetails SET BillId = @TargetBillId WHERE BillId = @SourceBillId", conn, trans))
+                        {
+                            cmdMoveDetails.Parameters.AddWithValue("@TargetBillId", targetBillId);
+                            cmdMoveDetails.Parameters.AddWithValue("@SourceBillId", sourceBillId);
+                            cmdMoveDetails.ExecuteNonQuery();
+                        }
+
+                        // Tính lại tổng tiền cho bàn đích
+                        using (SqlCommand cmdUpdateTargetTotal = new SqlCommand("UPDATE Bills SET TotalAmount = (SELECT ISNULL(SUM(Quantity * UnitPrice), 0) FROM BillDetails WHERE BillId = @TargetBillId) WHERE BillId = @TargetBillId", conn, trans))
+                        {
+                            cmdUpdateTargetTotal.Parameters.AddWithValue("@TargetBillId", targetBillId);
+                            cmdUpdateTargetTotal.ExecuteNonQuery();
+                        }
+
+                        // Xóa hóa đơn cũ của bàn nguồn và giải phóng bàn nguồn về 'Trống'
+                        using (SqlCommand cmdDeleteOldBill = new SqlCommand("DELETE FROM Bills WHERE BillId = @SourceBillId", conn, trans))
+                        {
+                            cmdDeleteOldBill.Parameters.AddWithValue("@SourceBillId", sourceBillId);
+                            cmdDeleteOldBill.ExecuteNonQuery();
+                        }
+
+                        using (SqlCommand cmdFreeSource = new SqlCommand("UPDATE Tables SET Status = N'Trống' WHERE TableId = @SourceTableId", conn, trans))
+                        {
+                            cmdFreeSource.Parameters.AddWithValue("@SourceTableId", sourceTableId);
+                            cmdFreeSource.ExecuteNonQuery();
+                        }
+
+                        trans.Commit();
+                    }
+                    catch
+                    {
+                        trans.Rollback();
+                        throw;
+                    }
+                }
+            }
+        }
+
+        // Chốt thanh toán hóa đơn, lưu phương thức thanh toán (Tiền mặt / Chuyển khoản / Shopee / Grab) và trả bàn về 'Trống'
+        public bool CheckoutTable(int tableId, int discountPercent, string paymentMethod, out decimal finalAmount)
+        {
+            finalAmount = 0;
+            using (SqlConnection conn = DatabaseHelper.GetConnection())
+            {
+                conn.Open();
+                using (SqlTransaction trans = conn.BeginTransaction())
+                {
+                    try
+                    {
+                        int billId = -1;
+                        using (SqlCommand cmdGetBill = new SqlCommand("SELECT TOP 1 BillId FROM Bills WHERE TableId = @TableId AND Status = 0", conn, trans))
+                        {
+                            cmdGetBill.Parameters.AddWithValue("@TableId", tableId);
+                            object obj = cmdGetBill.ExecuteScalar();
+                            if (obj == null || obj == DBNull.Value)
+                            {
+                                return false;
+                            }
+                            billId = Convert.ToInt32(obj);
+                        }
+
+                        decimal rawTotal = 0;
+                        using (SqlCommand cmdSum = new SqlCommand("SELECT ISNULL(SUM(Quantity * UnitPrice), 0) FROM BillDetails WHERE BillId = @BillId", conn, trans))
+                        {
+                            cmdSum.Parameters.AddWithValue("@BillId", billId);
+                            rawTotal = Convert.ToDecimal(cmdSum.ExecuteScalar());
+                        }
+
+                        finalAmount = rawTotal - (rawTotal * discountPercent / 100m);
+
+                        // Cập nhật trạng thái hóa đơn Status = 1 (Đã thanh toán) và lưu loại tiền thanh toán
+                        using (SqlCommand cmdCloseBill = new SqlCommand("UPDATE Bills SET CheckOutTime = GETDATE(), DiscountPercent = @Discount, TotalAmount = @FinalAmount, PaymentMethod = @Method, Status = 1 WHERE BillId = @BillId", conn, trans))
+                        {
+                            cmdCloseBill.Parameters.AddWithValue("@Discount", discountPercent);
+                            cmdCloseBill.Parameters.AddWithValue("@FinalAmount", finalAmount);
+                            cmdCloseBill.Parameters.AddWithValue("@Method", paymentMethod);
+                            cmdCloseBill.Parameters.AddWithValue("@BillId", billId);
+                            cmdCloseBill.ExecuteNonQuery();
+                        }
+
+                        // Giải phóng bàn về trạng thái 'Trống' sau khi khách thanh toán rời đi
+                        using (SqlCommand cmdFreeTable = new SqlCommand("UPDATE Tables SET Status = N'Trống' WHERE TableId = @TableId", conn, trans))
+                        {
+                            cmdFreeTable.Parameters.AddWithValue("@TableId", tableId);
+                            cmdFreeTable.ExecuteNonQuery();
+                        }
+
+                        trans.Commit();
+                        return true;
+                    }
+                    catch
+                    {
+                        trans.Rollback();
+                        throw;
+                    }
+                }
+            }
+        }
+
+        // Lấy danh sách món đã được bấm 'Gửi pha chế' để hiển thị trên màn hình KDS
+        public DataTable GetPendingKitchenItems()
+        {
+            string query = @"
+                SELECT bd.BillDetailId AS [Mã], t.TableName AS [Bàn / Đơn], p.ProductName AS [Tên món cần pha], 
+                       bd.Quantity AS [Số lượng], FORMAT(b.CheckInTime, 'HH:mm:ss') AS [Giờ gọi], bd.KitchenStatus AS [Trạng thái]
+                FROM BillDetails bd
+                INNER JOIN Bills b ON bd.BillId = b.BillId
+                INNER JOIN Tables t ON b.TableId = t.TableId
+                INNER JOIN Products p ON bd.ProductId = p.ProductId
+                WHERE b.Status = 0 AND bd.KitchenStatus = N'Chờ pha chế'
+                ORDER BY bd.BillDetailId ASC";
+            return DatabaseHelper.ExecuteQuery(query);
+        }
+
+        // Đánh dấu hoàn thành pha chế trên màn hình KDS
+        public void MarkKitchenItemDone(int billDetailId)
+        {
+            string query = "UPDATE BillDetails SET KitchenStatus = N'Đã phục vụ' WHERE BillDetailId = @Id";
+            DatabaseHelper.ExecuteNonQuery(query, new SqlParameter[] { new SqlParameter("@Id", billDetailId) });
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: ServerDataAdapter.cs 
+========================================= */
+
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using Protocol;
+
+namespace CafeServer.DAL
+{
+    public class ServerDataAdapter
+    {
+        private readonly UserDAL _userDal = new UserDAL();
+        private readonly MenuDAL _menuDal = new MenuDAL();
+        private readonly PosServiceDAL _posDal = new PosServiceDAL();
+
+        public List<UserDTO> GetAllUsersDto()
+        {
+            DataTable dt = _userDal.GetAllUsers();
+            var list = new List<UserDTO>();
+            foreach (DataRow r in dt.Rows)
+            {
+                list.Add(new UserDTO
+                {
+                    DisplayOrderId = Convert.ToInt32(r["Mã NV"]),
+                    Username = r["Tài khoản"].ToString(),
+                    FullName = r["Họ và tên"].ToString(),
+                    Role = r["Quyền hạn"].ToString(),
+                    Email = r["Gmail liên kết"] == DBNull.Value ? "" : r["Gmail liên kết"].ToString(),
+                    IsActive = Convert.ToBoolean(r["Đang hoạt động"])
+                });
+            }
+            return list;
+        }
+
+        public List<CategoryDTO> GetAllCategoriesDto()
+        {
+            DataTable dt = _menuDal.GetAllCategories();
+            var list = new List<CategoryDTO>();
+            foreach (DataRow r in dt.Rows)
+            {
+                list.Add(new CategoryDTO
+                {
+                    CategoryId = Convert.ToInt32(r["CategoryId"]),
+                    CategoryName = r["CategoryName"].ToString()
+                });
+            }
+            return list;
+        }
+
+        public List<ProductDTO> GetProductsForManagerDto(int categoryId = 0, string keyword = "")
+        {
+            DataTable dt = _menuDal.GetProductsForManager(categoryId, keyword);
+            var list = new List<ProductDTO>();
+            foreach (DataRow r in dt.Rows)
+            {
+                list.Add(new ProductDTO
+                {
+                    STT = Convert.ToInt32(r["STT"]),
+                    ProductId = Convert.ToInt32(r["ProductId"]),
+                    CategoryId = r["CategoryId"] == DBNull.Value ? 0 : Convert.ToInt32(r["CategoryId"]),
+                    ProductName = r["Tên món nước"].ToString(),
+                    CategoryName = r["Danh mục"].ToString(),
+                    Price = Convert.ToDecimal(r["Đơn giá (VNĐ)"]),
+                    IsActive = Convert.ToBoolean(r["Đang bán"]),
+                    ImagePath = r["ImagePath"].ToString()
+                });
+            }
+            return list;
+        }
+
+        public List<OrderItemDTO> GetBillDetailsByTableDto(int tableId)
+        {
+            DataTable dt = _posDal.GetBillDetailsByTable(tableId);
+            var list = new List<OrderItemDTO>();
+            foreach (DataRow r in dt.Rows)
+            {
+                list.Add(new OrderItemDTO
+                {
+                    BillDetailId = Convert.ToInt32(r["BillDetailId"]),
+                    ProductName = r["Tên món"].ToString(),
+                    Quantity = Convert.ToInt32(r["SL"]),
+                    UnitPrice = Convert.ToDecimal(r["Đơn giá"]),
+                    KitchenStatus = r["Trạng thái"].ToString()
+                });
+            }
+            return list;
+        }
+
+        public List<KitchenItemDTO> GetPendingKitchenItemsDto()
+        {
+            DataTable dt = _posDal.GetPendingKitchenItems();
+            var list = new List<KitchenItemDTO>();
+            foreach (DataRow r in dt.Rows)
+            {
+                list.Add(new KitchenItemDTO
+                {
+                    BillDetailId = Convert.ToInt32(r["Mã"]),
+                    TableName = r["Bàn / Đơn"].ToString(),
+                    ProductName = r["Tên món cần pha"].ToString(),
+                    Quantity = Convert.ToInt32(r["Số lượng"]),
+                    OrderTime = r["Giờ gọi"].ToString(),
+                    KitchenStatus = r["Trạng thái"].ToString()
+                });
+            }
+            return list;
+        }
+
+        // Chuyển câu SQL từ FrmStatistics.cs về Server
+        public List<BillStatDTO> GetRevenueStats(DateTime fromDate, DateTime toDate)
+        {
+            string sql = @"SELECT BillId, TableId, CheckInTime, CheckOutTime, PaymentMethod, DiscountPercent, TotalAmount 
+                           FROM Bills 
+                           WHERE Status = 1 AND CAST(CheckOutTime AS DATE) BETWEEN @tu AND @den
+                           ORDER BY CheckOutTime DESC";
+            SqlParameter[] p = {
+                new SqlParameter("@tu", fromDate.Date),
+                new SqlParameter("@den", toDate.Date)
+            };
+
+            DataTable dt = DatabaseHelper.ExecuteQuery(sql, p);
+            var list = new List<BillStatDTO>();
+            foreach (DataRow r in dt.Rows)
+            {
+                list.Add(new BillStatDTO
+                {
+                    BillId = Convert.ToInt32(r["BillId"]),
+                    TableId = Convert.ToInt32(r["TableId"]),
+                    CheckInTime = Convert.ToDateTime(r["CheckInTime"]),
+                    CheckOutTime = r["CheckOutTime"] == DBNull.Value ? (DateTime?)null : Convert.ToDateTime(r["CheckOutTime"]),
+                    PaymentMethod = r["PaymentMethod"] == DBNull.Value ? "Tiền mặt" : r["PaymentMethod"].ToString(),
+                    DiscountPercent = r["DiscountPercent"] == DBNull.Value ? 0 : Convert.ToInt32(r["DiscountPercent"]),
+                    TotalAmount = r["TotalAmount"] == DBNull.Value ? 0 : Convert.ToDecimal(r["TotalAmount"])
+                });
+            }
+            return list;
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: UserDAL.cs 
+========================================= */
+
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using Protocol;
+using CafeServer.Services;
+
+namespace CafeServer.DAL
+{
+    public class UserDAL
+    {
+        public UserDAL()
+        {
+            EnsureUsersSchemaAndDefaultAdmin();
+        }
+
+        private void EnsureUsersSchemaAndDefaultAdmin()
+        {
+            try
+            {
+                string sql = @"
+                    IF COL_LENGTH('dbo.Users', 'Email') IS NULL
+                    BEGIN
+                        ALTER TABLE dbo.Users ADD Email VARCHAR(100) NULL;
+                    END";
+                DatabaseHelper.ExecuteNonQuery(sql);
+
+                string adminHash = AuthService.HashPassword("admin123");
+                string staffHash = AuthService.HashPassword("staff123");
+
+                string seedSql = @"
+                    IF NOT EXISTS (SELECT 1 FROM Users WHERE Username = 'admin')
+                    BEGIN
+                        INSERT INTO Users (Username, PasswordHash, FullName, Role, IsActive, Email)
+                        VALUES ('admin', @AdminHash, N'Quản lý Hệ thống', 'Admin', 1, 'admin@gmail.com');
+                    END
+                    ELSE
+                    BEGIN
+                        UPDATE Users SET Email = ISNULL(Email, 'admin@gmail.com') WHERE Username = 'admin';
+                    END
+
+                    IF NOT EXISTS (SELECT 1 FROM Users WHERE Username = 'thungan1')
+                    BEGIN
+                        INSERT INTO Users (Username, PasswordHash, FullName, Role, IsActive, Email)
+                        VALUES ('thungan1', @StaffHash, N'Thu ngân Ca Sáng', 'Staff', 1, 'thungan1@gmail.com');
+                    END";
+
+                DatabaseHelper.ExecuteNonQuery(seedSql, new SqlParameter[]
+                {
+                    new SqlParameter("@AdminHash", adminHash),
+                    new SqlParameter("@StaffHash", staffHash)
+                });
+            }
+            catch
+            {
+                // Bỏ qua nếu bảng đã sẵn sàng
+            }
+        }
+
+        public UserDTO CheckLogin(string username, string plainPassword)
+        {
+            string hash = AuthService.HashPassword(plainPassword);
+            string query = @"
+                SELECT UserId, Username, FullName, Role, IsActive, Email 
+                FROM Users 
+                WHERE Username = @u AND (PasswordHash = @hash OR PasswordHash = @raw) AND IsActive = 1";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@u", username.Trim()),
+                new SqlParameter("@hash", hash),
+                new SqlParameter("@raw", plainPassword.Trim())
+            };
+
+            DataTable dt = DatabaseHelper.ExecuteQuery(query, prms);
+            if (dt.Rows.Count > 0)
+            {
+                DataRow r = dt.Rows[0];
+                return new UserDTO
+                {
+                    UserId = Convert.ToInt32(r["UserId"]),
+                    Username = r["Username"].ToString(),
+                    FullName = r["FullName"].ToString(),
+                    Role = r["Role"].ToString(),
+                    IsActive = Convert.ToBoolean(r["IsActive"]),
+                    Email = r.Table.Columns.Contains("Email") && r["Email"] != DBNull.Value ? r["Email"].ToString() : ""
+                };
+            }
+            return null;
+        }
+
+        // Tự động đánh lại Mã NV liên tục (1, 2, 3...) không bị nhảy cóc khi xóa
+        public DataTable GetAllUsers()
+        {
+            string query = @"
+                SELECT ROW_NUMBER() OVER (ORDER BY UserId ASC) AS [Mã NV], 
+                       Username AS [Tài khoản], 
+                       FullName AS [Họ và tên], 
+                       Role AS [Quyền hạn], 
+                       Email AS [Gmail liên kết], 
+                       IsActive AS [Đang hoạt động]
+                FROM Users
+                ORDER BY UserId ASC";
+            return DatabaseHelper.ExecuteQuery(query);
+        }
+
+        public bool IsUsernameOrEmailExist(string username, string email)
+        {
+            string query = "SELECT COUNT(1) FROM Users WHERE Username = @u OR (Email IS NOT NULL AND Email = @e)";
+            SqlParameter[] prms = {
+                new SqlParameter("@u", username.Trim()),
+                new SqlParameter("@e", email.Trim())
+            };
+            int count = Convert.ToInt32(DatabaseHelper.ExecuteScalar(query, prms));
+            return count > 0;
+        }
+
+        public bool CheckEmailExist(string email)
+        {
+            string query = "SELECT COUNT(1) FROM Users WHERE Email = @e AND IsActive = 1";
+            SqlParameter[] prms = { new SqlParameter("@e", email.Trim()) };
+            int count = Convert.ToInt32(DatabaseHelper.ExecuteScalar(query, prms));
+            return count > 0;
+        }
+
+        public bool CreateAccountByAdmin(string username, string plainPassword, string fullName, string role, string email)
+        {
+            string hash = AuthService.HashPassword(plainPassword);
+            string query = @"
+                INSERT INTO Users (Username, PasswordHash, FullName, Role, IsActive, Email) 
+                VALUES (@u, @p, @fn, @role, 1, @e)";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@u", username.Trim()),
+                new SqlParameter("@p", hash),
+                new SqlParameter("@fn", string.IsNullOrWhiteSpace(fullName) ? username.Trim() : fullName.Trim()),
+                new SqlParameter("@role", role),
+                new SqlParameter("@e", email.Trim())
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        public bool UpdatePasswordByEmail(string email, string newPlainPassword)
+        {
+            string hash = AuthService.HashPassword(newPlainPassword);
+            string query = "UPDATE Users SET PasswordHash = @p WHERE Email = @e";
+            SqlParameter[] prms = {
+                new SqlParameter("@p", hash),
+                new SqlParameter("@e", email.Trim())
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Xóa nhân viên theo đúng thứ tự Mã NV hiển thị và tự động Reseed lại bộ đếm SQL
+        public bool DeleteUser(int displayOrderId)
+        {
+            string query = @"
+                WITH OrderedUsers AS (
+                    SELECT UserId, ROW_NUMBER() OVER (ORDER BY UserId ASC) AS RN
+                    FROM Users
+                )
+                DELETE FROM Users
+                WHERE UserId IN (SELECT UserId FROM OrderedUsers WHERE RN = @rn);
+
+                DECLARE @MaxId INT = ISNULL((SELECT MAX(UserId) FROM Users), 0);
+                DBCC CHECKIDENT ('Users', RESEED, @MaxId);";
+
+            SqlParameter[] prms = { new SqlParameter("@rn", displayOrderId) };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+
+        // Khóa / Mở khóa tài khoản theo đúng thứ tự Mã NV hiển thị
+        public bool ToggleUserActiveStatus(int displayOrderId, bool currentStatus)
+        {
+            string query = @"
+                WITH OrderedUsers AS (
+                    SELECT UserId, ROW_NUMBER() OVER (ORDER BY UserId ASC) AS RN
+                    FROM Users
+                )
+                UPDATE Users
+                SET IsActive = @newStatus
+                WHERE UserId IN (SELECT UserId FROM OrderedUsers WHERE RN = @rn)";
+
+            SqlParameter[] prms = {
+                new SqlParameter("@newStatus", !currentStatus),
+                new SqlParameter("@rn", displayOrderId)
+            };
+            return DatabaseHelper.ExecuteNonQuery(query, prms) > 0;
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: UserDTO.cs 
+========================================= */
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace QuanLyCafe_Nhom8.DAL
+{
+    public class UserDTO
+    {
+        public int UserId { get; set; }
+        public string Username { get; set; }
+        public string PasswordHash { get; set; }
+        public string FullName { get; set; }
+        public string Role { get; set; }
+        public bool IsActive { get; set; }
+        public string Email { get; set; }
+    }
+}
+
+
+/* =========================================
+   FILE: AssemblyInfo.cs 
+========================================= */
+
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+// General Information about an assembly is controlled through the following
+// set of attributes. Change these attribute values to modify the information
+// associated with an assembly.
+[assembly: AssemblyTitle("CafeServer")]
+[assembly: AssemblyDescription("")]
+[assembly: AssemblyConfiguration("")]
+[assembly: AssemblyCompany("")]
+[assembly: AssemblyProduct("CafeServer")]
+[assembly: AssemblyCopyright("Copyright ©  2026")]
+[assembly: AssemblyTrademark("")]
+[assembly: AssemblyCulture("")]
+
+// Setting ComVisible to false makes the types in this assembly not visible
+// to COM components.  If you need to access a type in this assembly from
+// COM, set the ComVisible attribute to true on that type.
+[assembly: ComVisible(false)]
+
+// The following GUID is for the ID of the typelib if this project is exposed to COM
+[assembly: Guid("e920d17f-9493-42dd-a286-67f8bee765b5")]
+
+// Version information for an assembly consists of the following four values:
+//
+//      Major Version
+//      Minor Version
+//      Build Number
+//      Revision
+//
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
+
+
+/* =========================================
+   FILE: AuthService.cs 
+========================================= */
+
+using System;
+using System.Net;
+using System.Net.Mail;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace CafeServer.Services
+{
+    public static class AuthService
+    {
+        // 1. NHẬP GMAIL CỦA BẠN VÀO ĐÂY:
+        private static readonly string SenderEmail = "kaytjungle@gmail.com";
+
+        // 2. NHẬP MÃ 16 KÝ TỰ VÀO ĐÂY (VÍ DỤ: "abcd efgh ijkl mnop"):
+        private static readonly string AppPassword = "ojwy azud ahht ukzb";
+
+        public static string HashPassword(string password)
+        {
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                byte[] bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
+                StringBuilder builder = new StringBuilder();
+                foreach (byte b in bytes)
+                {
+                    builder.Append(b.ToString("x2"));
+                }
+                return builder.ToString();
+            }
+        }
+
+        public static string GenerateOTP()
+        {
+            Random rnd = new Random();
+            return rnd.Next(100000, 999999).ToString();
+        }
+
+        public static bool SendOtpEmail(string toEmail, string otpCode, string actionTitle, out string errorMsg)
+        {
+            errorMsg = "";
+            try
+            {
+                // Đoạn chặn Demo đã bị xóa hoàn toàn ở đây!
+                // Mã bây giờ sẽ gửi thẳng tới máy chủ Google.
+
+                string cleanAppPassword = AppPassword.Replace(" ", "").Trim();
+
+                using (MailMessage mail = new MailMessage())
+                {
+                    mail.From = new MailAddress(SenderEmail, "COFFEE FEFA - NHÓM 8");
+                    mail.To.Add(toEmail.Trim());
+                    mail.Subject = $"[COFFEE FEFA] Mã OTP {actionTitle}";
+                    mail.IsBodyHtml = true;
+                    mail.Body = $@"
+                        <div style='font-family: Segoe UI, sans-serif; padding: 20px; border: 2px solid #6F4E37; border-radius: 10px; max-width: 520px;'>
+                            <h2 style='color: #3E2723; margin-top: 0;'>☕ HỆ THỐNG QUẢN LÝ CAFE - NHÓM 8</h2>
+                            <p>Xin chào,</p>
+                            <p>Hệ thống đang thực hiện yêu cầu: <b>{actionTitle}</b> cho địa chỉ Gmail này.</p>
+                            <p>Mã xác thực OTP gồm 6 chữ số của bạn là:</p>
+                            <div style='font-size: 28px; font-weight: bold; color: #D35400; letter-spacing: 6px; background: #FDF2E9; padding: 14px; text-align: center; border-radius: 6px;'>
+                                {otpCode}
+                            </div>
+                            <p style='color: #555; font-size: 13px; margin-top: 15px;'>
+                                * Mã này có hiệu lực trong vòng <b>5 phút</b>. Tuyệt đối không chia sẻ mã này cho người khác.
+                            </p>
+                        </div>";
+
+                    using (SmtpClient smtp = new SmtpClient("smtp.gmail.com", 587))
+                    {
+                        smtp.EnableSsl = true;
+                        smtp.UseDefaultCredentials = false;
+                        smtp.Credentials = new NetworkCredential(SenderEmail, cleanAppPassword);
+                        smtp.Send(mail);
+                    }
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // Bắt đúng lỗi thực tế từ Google nếu mật khẩu ứng dụng bị sai
+                errorMsg = ex.Message;
+                return false;
+            }
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: SmartPaymentService.cs 
+========================================= */
+
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Media;
+using System.Net;
+using System.Text;
+
+namespace CafeServer.Services
+{
+    public static class SmartPaymentService
+    {
+        // Thông tin tài khoản Vietcombank chính chủ của Nguyễn Hoàng Duy Anh
+        public static string BankId = "970436";
+        public static string BankShortName = "Vietcombank";
+        public static string AccountNo = "9942886521";
+        public static string AccountName = "NGUYEN HOANG DUY ANH";
+
+        // Hàm trả về trực tiếp đối tượng Bitmap để gán thẳng vào PictureBox.Image (Không bao giờ bị lỗi X đỏ)
+        public static Bitmap GetQrBitmap(decimal amount, string tableName)
+        {
+            string filePath = BuildVietQrUrl(amount, tableName);
+            using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (Image img = Image.FromStream(fs))
+            {
+                return new Bitmap(img);
+            }
+        }
+
+        // Hàm tạo và tải ảnh VietQR động (trả về đường dẫn file ảnh hợp lệ trên ổ cứng)
+        public static string BuildVietQrUrl(decimal amount, string tableName)
+        {
+            long roundedAmount = Convert.ToInt64(Math.Round(amount));
+            string cleanTable = string.IsNullOrWhiteSpace(tableName) ? "Ban Cafe" : tableName.Trim();
+            string addInfo = Uri.EscapeDataString($"Thanh toan {cleanTable}");
+            string accName = Uri.EscapeDataString(AccountName);
+
+            string tempFilePath = Path.Combine(Path.GetTempPath(), $"vietqr_{Guid.NewGuid():N}.png");
+
+            try
+            {
+                // Bật TLS 1.2 và TLS 1.3 (nếu hệ điều hành hỗ trợ)
+                ServicePointManager.Expect100Continue = true;
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11 | (SecurityProtocolType)3072;
+
+                // 1. Ưu tiên tải mẫu VietQR chính thức của Vietcombank
+                string vietQrApiUrl = $"https://img.vietqr.io/image/{BankId}-{AccountNo}-compact2.png?amount={roundedAmount}&addInfo={addInfo}&accountName={accName}";
+
+                using (WebClient wc = new WebClient())
+                {
+                    wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+                    byte[] imgBytes = wc.DownloadData(vietQrApiUrl);
+
+                    // Kiểm tra chắc chắn dữ liệu tải về là file ảnh hợp lệ (tránh trường hợp Cloudflare trả về trang HTML)
+                    if (TrySaveValidImage(imgBytes, tempFilePath))
+                    {
+                        return tempFilePath;
+                    }
+                    throw new Exception("Dữ liệu từ img.vietqr.io không phải là ảnh hợp lệ.");
+                }
+            }
+            catch
+            {
+                try
+                {
+                    // 2. Dự phòng: Tự sinh mã chuẩn Napas247 EMVCo của Vietcombank 9942886521 qua qrserver
+                    string emvPayload = BuildNapas247Payload(roundedAmount, $"Thanh toan {cleanTable}");
+                    string backupQrUrl = $"https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=10&data={Uri.EscapeDataString(emvPayload)}";
+
+                    using (WebClient wc = new WebClient())
+                    {
+                        wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+                        byte[] qrBytes = wc.DownloadData(backupQrUrl);
+
+                        if (qrBytes == null || qrBytes.Length < 200)
+                            throw new Exception("Ảnh QR dự phòng không hợp lệ.");
+
+                        using (MemoryStream ms = new MemoryStream(qrBytes))
+                        using (Image qrImg = Image.FromStream(ms))
+                        using (Bitmap cardBmp = DrawVietcombankCard(qrImg, roundedAmount))
+                        {
+                            cardBmp.Save(tempFilePath, ImageFormat.Png);
+                            return tempFilePath;
+                        }
+                    }
+                }
+                catch
+                {
+                    // 3. Dự phòng Offline: Kiểm tra xem có ảnh VietQR tĩnh lưu sẵn trong thư mục chạy không, nếu không thì tự vẽ QR
+                    Image localQr = TryLoadLocalFallbackQr();
+                    using (Bitmap offlineBmp = DrawVietcombankCard(localQr, roundedAmount))
+                    {
+                        if (localQr != null) localQr.Dispose();
+                        offlineBmp.Save(tempFilePath, ImageFormat.Png);
+                        return tempFilePath;
+                    }
+                }
+            }
+        }
+
+        // Kiểm tra mảng byte có thực sự là ảnh hợp lệ trước khi ghi ra ổ cứng
+        private static bool TrySaveValidImage(byte[] bytes, string savePath)
+        {
+            if (bytes == null || bytes.Length < 500) return false;
+            try
+            {
+                using (MemoryStream ms = new MemoryStream(bytes))
+                using (Image img = Image.FromStream(ms))
+                using (Bitmap bmp = new Bitmap(img))
+                {
+                    bmp.Save(savePath, ImageFormat.Png);
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Tìm ảnh QR tĩnh trong thư mục bin\Debug (nếu bạn chép ảnh VietQR gốc vào thư mục chạy)
+        private static Image TryLoadLocalFallbackQr()
+        {
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string[] candidateNames = { "vietqr.png", "vietqr.jpg", "1794504598098.png", "qr_vcb.png" };
+            foreach (string name in candidateNames)
+            {
+                string fullPath = Path.Combine(baseDir, name);
+                if (File.Exists(fullPath))
+                {
+                    try
+                    {
+                        byte[] bytes = File.ReadAllBytes(fullPath);
+                        return Image.FromStream(new MemoryStream(bytes));
+                    }
+                    catch { }
+                }
+            }
+            return null;
+        }
+
+        private static string BuildNapas247Payload(long amount, string description)
+        {
+            string accField = $"0006{BankId}01{AccountNo.Length:D2}{AccountNo}";
+            string serviceField = $"0010A00000072701{accField.Length:D2}{accField}0208QRIBFTTA";
+            string merchantTag38 = $"38{serviceField.Length:D2}{serviceField}";
+
+            string amountStr = amount.ToString();
+            string amountTag54 = amount > 0 ? $"54{amountStr.Length:D2}{amountStr}" : "";
+
+            string cleanDesc = RemoveVietnameseAccents(description);
+            if (cleanDesc.Length > 25) cleanDesc = cleanDesc.Substring(0, 25);
+            string subTag08 = $"08{cleanDesc.Length:D2}{cleanDesc}";
+            string addDataTag62 = $"62{subTag08.Length:D2}{subTag08}";
+
+            string rawPayload = $"000201010212{merchantTag38}5303704{amountTag54}5802VN{addDataTag62}6304";
+            string crc = ComputeCrc16Ccitt(rawPayload);
+            return rawPayload + crc;
+        }
+
+        private static string ComputeCrc16Ccitt(string input)
+        {
+            ushort crc = 0xFFFF;
+            byte[] bytes = Encoding.ASCII.GetBytes(input);
+            foreach (byte b in bytes)
+            {
+                crc ^= (ushort)(b << 8);
+                for (int i = 0; i < 8; i++)
+                {
+                    if ((crc & 0x8000) != 0)
+                        crc = (ushort)((crc << 1) ^ 0x1021);
+                    else
+                        crc <<= 1;
+                }
+            }
+            return crc.ToString("X4");
+        }
+
+        private static string RemoveVietnameseAccents(string text)
+        {
+            string normalized = text.Normalize(NormalizationForm.FormD);
+            StringBuilder sb = new StringBuilder();
+            foreach (char c in normalized)
+            {
+                System.Globalization.UnicodeCategory uc = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c);
+                if (uc != System.Globalization.UnicodeCategory.NonSpacingMark)
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString().Normalize(NormalizationForm.FormC).Replace('đ', 'd').Replace('Đ', 'D');
+        }
+
+        private static Bitmap DrawVietcombankCard(Image qrImage, long amount)
+        {
+            Bitmap bmp = new Bitmap(360, 460);
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.Clear(Color.FromArgb(242, 249, 235));
+
+                using (SolidBrush cardBrush = new SolidBrush(Color.White))
+                {
+                    g.FillRectangle(cardBrush, 20, 20, 320, 420);
+                }
+
+                StringFormat sf = new StringFormat { Alignment = StringAlignment.Center };
+                using (Font fBank = new Font("Segoe UI", 15, FontStyle.Bold))
+                using (SolidBrush brGreen = new SolidBrush(Color.FromArgb(0, 107, 63)))
+                {
+                    g.DrawString("Vietcombank", fBank, brGreen, new RectangleF(0, 28, 360, 32), sf);
+                }
+
+                if (qrImage != null)
+                {
+                    g.DrawImage(qrImage, new Rectangle(55, 68, 250, 250));
+                }
+                else
+                {
+                    // Vẽ ma trận QR mô phỏng khi mất mạng hoàn toàn để khung không bị trống
+                    DrawOfflineQrMatrix(g, new Rectangle(65, 78, 230, 230));
+                }
+
+                using (Font fSub = new Font("Segoe UI", 9.5f, FontStyle.Bold))
+                using (SolidBrush brRed = new SolidBrush(Color.FromArgb(192, 57, 43)))
+                {
+                    g.DrawString("VIETQR - NAPAS 247", fSub, brRed, new RectangleF(0, 328, 360, 22), sf);
+                }
+
+                using (Font fName = new Font("Segoe UI", 11, FontStyle.Bold))
+                using (Font fAcc = new Font("Segoe UI", 11, FontStyle.Regular))
+                using (SolidBrush brDark = new SolidBrush(Color.FromArgb(30, 30, 30)))
+                {
+                    g.DrawString(AccountName, fName, brDark, new RectangleF(0, 358, 360, 24), sf);
+                    g.DrawString($"STK: {AccountNo}", fAcc, brDark, new RectangleF(0, 382, 360, 24), sf);
+                    if (amount > 0)
+                    {
+                        g.DrawString($"Số tiền: {amount:N0} VNĐ", fName, brDark, new RectangleF(0, 408, 360, 24), sf);
+                    }
+                }
+            }
+            return bmp;
+        }
+
+        private static void DrawOfflineQrMatrix(Graphics g, Rectangle bounds)
+        {
+            int gridSize = 21;
+            int cellSize = bounds.Width / gridSize;
+            Random rnd = new Random(994288652); // Seed cố định theo STK để hình QR luôn đồng nhất
+
+            using (SolidBrush black = new SolidBrush(Color.Black))
+            using (Pen borderPen = new Pen(Color.FromArgb(0, 107, 63), 2))
+            {
+                g.DrawRectangle(borderPen, bounds.X - 6, bounds.Y - 6, bounds.Width + 12, bounds.Height + 12);
+
+                for (int r = 0; r < gridSize; r++)
+                {
+                    for (int c = 0; c < gridSize; c++)
+                    {
+                        bool isFinder = (r < 7 && c < 7) || (r < 7 && c >= gridSize - 7) || (r >= gridSize - 7 && c < 7);
+                        if (isFinder)
+                        {
+                            int lr = r >= gridSize - 7 ? r - (gridSize - 7) : r;
+                            int lc = c >= gridSize - 7 ? c - (gridSize - 7) : c;
+                            if (lr == 0 || lr == 6 || lc == 0 || lc == 6 || (lr >= 2 && lr <= 4 && lc >= 2 && lc <= 4))
+                            {
+                                g.FillRectangle(black, bounds.X + c * cellSize, bounds.Y + r * cellSize, cellSize, cellSize);
+                            }
+                        }
+                        else if (rnd.Next(100) < 48)
+                        {
+                            g.FillRectangle(black, bounds.X + c * cellSize, bounds.Y + r * cellSize, cellSize, cellSize);
+                        }
+                    }
+                }
+            }
+        }
+
+        public static void PlaySuccessSound()
+        {
+            SystemSounds.Asterisk.Play();
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: Models.cs 
+========================================= */
+
+using System;
+using System.Collections.Generic;
+
+namespace Protocol
+{
+    public class UserDTO
+    {
+        public int UserId { get; set; }
+        public int DisplayOrderId { get; set; } // Mã NV hiển thị (1, 2, 3...)
+        public string Username { get; set; }
+        public string FullName { get; set; }
+        public string Role { get; set; }
+        public bool IsActive { get; set; }
+        public string Email { get; set; }
+    }
+
+    public class CategoryDTO
+    {
+        public int CategoryId { get; set; }
+        public string CategoryName { get; set; }
+    }
+
+    public class TableDTO
+    {
+        public int TableId { get; set; }
+        public string TableName { get; set; }
+        public string Status { get; set; }
+    }
+
+    public class ProductDTO
+    {
+        public int STT { get; set; }
+        public int ProductId { get; set; }
+        public int CategoryId { get; set; }
+        public string CategoryName { get; set; }
+        public string ProductName { get; set; }
+        public decimal Price { get; set; }
+        public bool IsActive { get; set; }
+        public string ImagePath { get; set; }
+    }
+
+    public class OrderItemDTO
+    {
+        public int BillDetailId { get; set; }
+        public int ProductId { get; set; }
+        public string ProductName { get; set; }
+        public int Quantity { get; set; }
+        public decimal UnitPrice { get; set; }
+        public decimal SubTotal => Quantity * UnitPrice;
+        public string KitchenStatus { get; set; }
+    }
+
+    public class KitchenItemDTO
+    {
+        public int BillDetailId { get; set; }
+        public string TableName { get; set; }
+        public string ProductName { get; set; }
+        public int Quantity { get; set; }
+        public string OrderTime { get; set; }
+        public string KitchenStatus { get; set; }
+    }
+
+    public class BillStatDTO
+    {
+        public int BillId { get; set; }
+        public int TableId { get; set; }
+        public DateTime CheckInTime { get; set; }
+        public DateTime? CheckOutTime { get; set; }
+        public string PaymentMethod { get; set; }
+        public int DiscountPercent { get; set; }
+        public decimal TotalAmount { get; set; }
+    }
+
+    // Các gói phản hồi thay thế tham số out của bản cục bộ
+    public class ManagerVerifyResponseDTO
+    {
+        public bool IsApproved { get; set; }
+        public string ManagerFullName { get; set; }
+    }
+
+    public class CheckoutResponseDTO
+    {
+        public bool IsSuccess { get; set; }
+        public int TableId { get; set; }
+        public decimal FinalAmount { get; set; }
+    }
+
+    public class QrResponseDTO
+    {
+        public string Base64Png { get; set; }
+    }
+}
+
+
+/* =========================================
+   FILE: PacketProtocol.cs 
+========================================= */
+
+using System;
+using System.IO;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+
+namespace Protocol
+{
+    public enum MsgType
+    {
+        // 1. Auth & User Management
+        LOGIN_REQ, LOGIN_OK, AUTH_FAIL,
+        FORGOT_SEND_OTP_REQ, FORGOT_RESET_PASS_REQ,
+        ADMIN_SEND_CREATE_OTP_REQ, ADMIN_CREATE_USER_REQ,
+        GET_USERS_REQ, DELETE_USER_REQ, TOGGLE_USER_REQ,
+        VERIFY_MANAGER_REQ,
+
+        // 2. Menu & Category
+        GET_CATEGORIES_REQ, ADD_CATEGORY_REQ,
+        GET_ACTIVE_PRODUCTS_REQ, GET_ALL_PRODUCTS_REQ,
+        INSERT_PRODUCT_REQ, UPDATE_PRODUCT_REQ,
+        TOGGLE_PRODUCT_REQ, DELETE_PRODUCT_REQ,
+
+        // 3. POS, Bàn, Order & Thanh toán
+        GET_TABLES_REQ, GET_BILL_DETAILS_REQ,
+        ADD_ITEM_REQ, REMOVE_ITEM_REQ, SEND_KITCHEN_REQ,
+        MOVE_TABLE_REQ, MERGE_TABLE_REQ,
+        CHECKOUT_REQ, GET_VIETQR_REQ,
+
+        // 4. Quầy Pha Chế (KDS) & Thống kê
+        GET_PENDING_KDS_REQ, KDS_COMPLETE_ITEM_REQ,
+        STATS_REVENUE_REQ,
+
+        // 5. Server Push Broadcast & System
+        TABLE_STATUS_CHANGED, MENU_UPDATED,
+        KDS_NEW_ORDER, KDS_ITEM_DONE,
+        PING, PONG, ERROR, TABLE_BUSY, PERMISSION_DENIED
+    }
+
+    public class PacketMessage
+    {
+        public string RequestId { get; set; } = Guid.NewGuid().ToString("N");
+        public MsgType Type { get; set; }
+        public string PayloadJson { get; set; } = "{}";
+        public bool Success { get; set; } = true;
+        public string ErrorCode { get; set; } = "";
+        public string Message { get; set; } = "";
+    }
+
+    public static class FramingHelper
+    {
+        public const int DefaultTcpPort = 9000;
+        public const int DefaultUdpPort = 9001;
+        public const string DiscoveryRequest = "DISCOVER_COFFEE_FEFA_SERVER";
+        public const string DiscoveryResponsePrefix = "COFFEE_FEFA_SERVER_OK|";
+        private const int MaxPacketSize = 1024 * 1024; // Giới hạn 1MB
+
+        public static async Task SendPacketAsync(NetworkStream stream, PacketMessage packet)
+        {
+            string json = JsonConvert.SerializeObject(packet);
+            byte[] payload = Encoding.UTF8.GetBytes(json);
+            if (payload.Length > MaxPacketSize)
+                throw new InvalidOperationException("Kích thước gói tin vượt quá 1MB.");
+
+            byte[] lengthHeader = BitConverter.GetBytes(payload.Length); // 4-byte Int32
+            byte[] buffer = new byte[4 + payload.Length];
+            Buffer.BlockCopy(lengthHeader, 0, buffer, 0, 4);
+            Buffer.BlockCopy(payload, 0, buffer, 4, payload.Length);
+
+            await stream.WriteAsync(buffer, 0, buffer.Length);
+            await stream.FlushAsync();
+        }
+
+        public static async Task<PacketMessage> ReceivePacketAsync(NetworkStream stream)
+        {
+            byte[] header = await ReadExactBytesAsync(stream, 4);
+            if (header == null) return null;
+
+            int payloadLength = BitConverter.ToInt32(header, 0);
+            if (payloadLength <= 0 || payloadLength > MaxPacketSize)
+                throw new InvalidDataException($"Header độ dài gói không hợp lệ: {payloadLength}");
+
+            byte[] payload = await ReadExactBytesAsync(stream, payloadLength);
+            if (payload == null) return null;
+
+            string json = Encoding.UTF8.GetString(payload);
+            return JsonConvert.DeserializeObject<PacketMessage>(json);
+        }
+
+        private static async Task<byte[]> ReadExactBytesAsync(NetworkStream stream, int count)
+        {
+            byte[] buffer = new byte[count];
+            int totalRead = 0;
+            while (totalRead < count)
+            {
+                int bytesRead = await stream.ReadAsync(buffer, totalRead, count - totalRead);
+                if (bytesRead == 0) return null; // Client đóng kết nối
+                totalRead += bytesRead;
+            }
+            return buffer;
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: AssemblyInfo.cs 
+========================================= */
+
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+
+// General Information about an assembly is controlled through the following
+// set of attributes. Change these attribute values to modify the information
+// associated with an assembly.
+[assembly: AssemblyTitle("Protocol")]
+[assembly: AssemblyDescription("")]
+[assembly: AssemblyConfiguration("")]
+[assembly: AssemblyCompany("")]
+[assembly: AssemblyProduct("Protocol")]
+[assembly: AssemblyCopyright("Copyright ©  2026")]
+[assembly: AssemblyTrademark("")]
+[assembly: AssemblyCulture("")]
+
+// Setting ComVisible to false makes the types in this assembly not visible
+// to COM components.  If you need to access a type in this assembly from
+// COM, set the ComVisible attribute to true on that type.
+[assembly: ComVisible(false)]
+
+// The following GUID is for the ID of the typelib if this project is exposed to COM
+[assembly: Guid("64611ee6-e755-437f-975e-53c462f0ff65")]
+
+// Version information for an assembly consists of the following four values:
+//
+//      Major Version
+//      Minor Version
+//      Build Number
+//      Revision
+//
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
 
 
 /* =========================================
@@ -1134,17 +3410,46 @@ namespace QuanLyCafe_Nhom8.DTO
         public decimal UnitPrice { get; set; }
         public decimal SubTotal => Quantity * UnitPrice;
     }
-}
 
-public class UserDTO
-{
-    public int UserId { get; set; }
-    public string Username { get; set; }
-    public string PasswordHash { get; set; }
-    public string FullName { get; set; }
-    public string Role { get; set; }
-    public bool IsActive { get; set; }
-    public string Email { get; set; }
+    public class UserDTO
+    {
+        public int UserId { get; set; }
+        public string Username { get; set; }
+        public string PasswordHash { get; set; }
+        public string FullName { get; set; }
+        public string Role { get; set; }
+        public bool IsActive { get; set; }
+        public string Email { get; set; }
+    }
+
+    public class CheckoutResponseDTO
+    {
+        public bool IsSuccess { get; set; }
+        public int TableId { get; set; }
+        public decimal FinalAmount { get; set; }
+        public string Message { get; set; }
+    }
+
+    public class KitchenItemDTO
+    {
+        public int BillDetailId { get; set; }
+        public string TableName { get; set; }
+        public string ProductName { get; set; }
+        public int Quantity { get; set; }
+        public string OrderTime { get; set; }
+        public string KitchenStatus { get; set; }
+    }
+
+    public class BillStatDTO
+    {
+        public int BillId { get; set; }
+        public int TableId { get; set; }
+        public DateTime CheckInTime { get; set; }
+        public DateTime CheckOutTime { get; set; }
+        public string PaymentMethod { get; set; }
+        public int DiscountPercent { get; set; }
+        public decimal TotalAmount { get; set; }
+    }
 }
 
 
@@ -1154,11 +3459,11 @@ public class UserDTO
 
 using System;
 using System.Collections.Generic;
-using System.Data;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using QuanLyCafe_Nhom8.DAL;
 using QuanLyCafe_Nhom8.DTO;
@@ -1773,7 +4078,7 @@ namespace QuanLyCafe_Nhom8.GUI
             chkShow.CheckedChanged += (s, e) => txtLoginPass.UseSystemPasswordChar = !chkShow.Checked;
 
             Control btnLogin3D = Create3DExtrudedButton(
-                "🚀 ĐĂNG NHẬP VÀO HỆ THỐNG POS",
+                "🚀 ĐĂNG NHẬP ",
                 new Point(40, 315),
                 new Size(390, 52),
                 Color.FromArgb(230, 126, 34),
@@ -2685,7 +4990,7 @@ namespace QuanLyCafe_Nhom8.GUI
             // 
             // FrmAuth
             // 
-            this.ClientSize = new System.Drawing.Size(759, 412);
+            this.ClientSize = new System.Drawing.Size(282, 253);
             this.Name = "FrmAuth";
             this.Load += new System.EventHandler(this.FrmAuth_Load);
             this.ResumeLayout(false);
@@ -2708,35 +5013,39 @@ using System;
 using System.Data;
 using System.Drawing;
 using System.Windows.Forms;
-using QuanLyCafe_Nhom8.DAL;
 using QuanLyCafe_Nhom8.Services;
 
 namespace QuanLyCafe_Nhom8.GUI
 {
     public partial class FrmKDS : Form
     {
-        // Khai báo lớp truy xuất dữ liệu POS và bộ đếm thời gian làm mới tự động
-        private readonly PosServiceDAL _posDal = new PosServiceDAL();
+        // Sử dụng NetworkClient TCP Realtime thay thế hoàn toàn cho Timer 3 giây cục bộ
+        private readonly NetworkClient _netClient = NetworkClient.Instance;
         private DataGridView dgvPending;
         private Button btnCompleteItem;
         private Button btnRefresh;
         private Label lblCount;
-        private Timer _refreshTimer;
+        private Label lblTcpStatus;
 
         public FrmKDS()
         {
             InitializeComponent();
             BuildKdsInterface();
+
+            _netClient.Start();
+            _netClient.OnServerEventReceived += OnTcpEventReceived;
+            _netClient.OnConnectionStateChanged += OnTcpConnectionChanged;
+
+            // Tự động đồng bộ danh sách món đang chờ ngay khi mở màn hình KDS
+            _ = _netClient.SendFrameAsync(MsgType.GET_PENDING_KDS, "SYNC");
             LoadPendingOrders();
-            StartAutoRefresh();
         }
 
-        // Thiết kế giao diện Màn hình Quầy Pha Chế (KDS)
         private void BuildKdsInterface()
         {
-            this.Text = "Màn hình Quầy Pha Chế Real-time (KDS) - Nhóm 8";
+            this.Text = "Màn hình Quầy Pha Chế Real-time (TCP Socket Client) - Nhóm 8";
             this.Size = new Size(920, 600);
-            this.StartPosition = FormStartPosition.CenterParent;
+            this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = Color.FromArgb(248, 245, 241);
 
             Panel pnlHeader = new Panel
@@ -2748,10 +5057,19 @@ namespace QuanLyCafe_Nhom8.GUI
 
             Label lblTitle = new Label
             {
-                Text = "QUẦY PHA CHẾ REAL-TIME (KITCHEN DISPLAY SYSTEM)",
-                Font = new Font("Segoe UI", 14, FontStyle.Bold),
+                Text = "QUẦY PHA CHẾ REAL-TIME (TCP SOCKET CLIENT)",
+                Font = new Font("Segoe UI", 13.5f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(255, 236, 179),
-                Location = new Point(20, 18),
+                Location = new Point(20, 10),
+                AutoSize = true
+            };
+
+            lblTcpStatus = new Label
+            {
+                Text = $"🟢 TCP Connected ({_netClient.ServerHost}:{_netClient.ServerPort}) - Chế độ Push Realtime (Không dùng Timer)",
+                Font = new Font("Segoe UI", 9f, FontStyle.Italic),
+                ForeColor = Color.FromArgb(129, 199, 132),
+                Location = new Point(22, 38),
                 AutoSize = true
             };
 
@@ -2765,6 +5083,7 @@ namespace QuanLyCafe_Nhom8.GUI
             };
 
             pnlHeader.Controls.Add(lblTitle);
+            pnlHeader.Controls.Add(lblTcpStatus);
             pnlHeader.Controls.Add(lblCount);
 
             dgvPending = new DataGridView
@@ -2784,7 +5103,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnCompleteItem = new Button
             {
-                Text = "✔ HOÀN THÀNH & GIAO MÓN ĐANG CHỌN",
+                Text = "✔ HOÀN THÀNH & BÁO VỀ THU NGÂN QUA TCP",
                 Location = new Point(20, 495),
                 Size = new Size(650, 48),
                 BackColor = Color.FromArgb(39, 174, 96),
@@ -2798,7 +5117,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             btnRefresh = new Button
             {
-                Text = "🔄 Làm mới ngay",
+                Text = "🔄 Đồng bộ TCP",
                 Location = new Point(685, 495),
                 Size = new Size(200, 48),
                 BackColor = Color.FromArgb(109, 76, 65),
@@ -2808,7 +5127,11 @@ namespace QuanLyCafe_Nhom8.GUI
                 Cursor = Cursors.Hand
             };
             btnRefresh.FlatAppearance.BorderSize = 0;
-            btnRefresh.Click += (s, e) => LoadPendingOrders();
+            btnRefresh.Click += async (s, e) =>
+            {
+                await _netClient.SendFrameAsync(MsgType.GET_PENDING_KDS, "SYNC");
+                LoadPendingOrders();
+            };
 
             this.Controls.Add(pnlHeader);
             this.Controls.Add(dgvPending);
@@ -2816,24 +5139,49 @@ namespace QuanLyCafe_Nhom8.GUI
             this.Controls.Add(btnRefresh);
         }
 
-        // Khởi tạo Timer tự động làm mới danh sách món chờ pha chế mỗi 3 giây (3000ms)
-        private void StartAutoRefresh()
+        // Nhận gói tin KDS_NEW_ORDER từ Server đẩy sang ngay khi Thu ngân bấm 'Gửi pha chế'
+        private void OnTcpEventReceived(string msgType, string payload)
         {
-            _refreshTimer = new Timer { Interval = 3000 };
-            _refreshTimer.Tick += (s, e) => LoadPendingOrders();
-            _refreshTimer.Start();
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+
+            if (msgType == MsgType.KDS_NEW_ORDER || msgType == MsgType.KDS_ITEM_DONE)
+            {
+                this.BeginInvoke(new Action(() =>
+                {
+                    LoadPendingOrders();
+                    if (msgType == MsgType.KDS_NEW_ORDER)
+                    {
+                        SmartPaymentService.PlaySuccessSound();
+                    }
+                }));
+            }
         }
 
-        // Tải danh sách các món có trạng thái 'Chờ pha chế' từ CSDL lên bảng
+        // Tự động gửi GET_PENDING_KDS khi kết nối lại mạng thành công
+        private void OnTcpConnectionChanged(bool connected, string statusText)
+        {
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+
+            this.BeginInvoke(new Action(async () =>
+            {
+                lblTcpStatus.Text = connected ? $"🟢 {statusText}" : $"🟠 {statusText}";
+                lblTcpStatus.ForeColor = connected ? Color.FromArgb(129, 199, 132) : Color.FromArgb(255, 183, 77);
+                if (connected)
+                {
+                    await _netClient.SendFrameAsync(MsgType.GET_PENDING_KDS, "RECONNECT_SYNC");
+                    LoadPendingOrders();
+                }
+            }));
+        }
+
         private void LoadPendingOrders()
         {
-            DataTable dt = _posDal.GetPendingKitchenItems();
+            DataTable dt = _netClient.GetPendingKitchenItems();
             dgvPending.DataSource = dt;
             lblCount.Text = $"Đang chờ: {dt.Rows.Count} món";
         }
 
-        // Sự kiện khi nhân viên pha chế bấm nút Hoàn thành món
-        private void btnCompleteItem_Click(object sender, EventArgs e)
+        private async void btnCompleteItem_Click(object sender, EventArgs e)
         {
             if (dgvPending.CurrentRow == null)
             {
@@ -2841,22 +5189,28 @@ namespace QuanLyCafe_Nhom8.GUI
                 return;
             }
 
-            // Lấy Mã chi tiết hóa đơn (cột 0), Tên Bàn/Đơn (cột 1) và Tên món (cột 2)
             int billDetailId = Convert.ToInt32(dgvPending.CurrentRow.Cells[0].Value);
             string tableName = dgvPending.CurrentRow.Cells[1].Value.ToString();
             string productName = dgvPending.CurrentRow.Cells[2].Value.ToString();
 
-            // Cập nhật trạng thái món sang 'Đã phục vụ' trong SQL Server
-            _posDal.MarkKitchenItemDone(billDetailId);
-            SmartPaymentService.PlaySuccessSound();
-            LoadPendingOrders();
-            MessageBox.Show($"Đã hoàn thành món [{productName}] cho [{tableName}]!", "Quầy Bar", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            btnCompleteItem.Enabled = false;
+            try
+            {
+                await _netClient.MarkKitchenItemDoneAsync(billDetailId, tableName, productName);
+                SmartPaymentService.PlaySuccessSound();
+                LoadPendingOrders();
+                MessageBox.Show($"Đã hoàn thành món [{productName}] cho [{tableName}] và báo về máy Thu ngân qua TCP!", "Quầy Bar (TCP)", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            finally
+            {
+                btnCompleteItem.Enabled = true;
+            }
         }
 
-        // Dừng Timer khi đóng màn hình KDS để giải phóng bộ nhớ
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            _refreshTimer?.Stop();
+            _netClient.OnServerEventReceived -= OnTcpEventReceived;
+            _netClient.OnConnectionStateChanged -= OnTcpConnectionChanged;
             base.OnFormClosing(e);
         }
 
@@ -2925,9 +5279,7 @@ namespace QuanLyCafe_Nhom8.GUI
    FILE: FrmMainPOS.cs 
 ========================================= */
 
-using QuanLyCafe_Nhom8.DAL;
 using QuanLyCafe_Nhom8.DTO;
-using QuanLyCafe_Nhom8.GUI;
 using QuanLyCafe_Nhom8.Services;
 using System;
 using System.Collections.Generic;
@@ -2944,8 +5296,8 @@ namespace QuanLyCafe_Nhom8.GUI
         private enum Channel { DineIn, TakeAway, ShopeeXanh, Grab }
         private const string StatusEmpty = "Trống";
 
-        // Tầng dữ liệu và trạng thái màn hình POS
-        private readonly PosServiceDAL _posDal = new PosServiceDAL();
+        // Sử dụng NetworkClient (TCP/UDP Length-Prefix 4 byte) thay vì gọi trực tiếp DAL hay TelegramBotService
+        private readonly NetworkClient _netClient = NetworkClient.Instance;
         private List<ProductDTO> _allProducts = new List<ProductDTO>();
         private List<TableDTO> _cachedTables = new List<TableDTO>();
         private readonly Dictionary<int, int> _tableDiscounts = new Dictionary<int, int>();
@@ -2956,18 +5308,46 @@ namespace QuanLyCafe_Nhom8.GUI
         private decimal _currentRawTotal = 0;
         private int _approvedDiscountPercent = 0;
 
-        // Tính tổng tiền sau giảm giá tại một nơi duy nhất
         private decimal FinalTotal => _currentRawTotal - (_currentRawTotal * _approvedDiscountPercent / 100m);
 
         public FrmMainPOS()
         {
             InitializeComponent();
             BuildModernPosInterface();
+
+            // Khởi động kết nối UDP Discovery + TCP Session Client
+            _netClient.Start();
+            _netClient.OnServerEventReceived += OnTcpServerEventReceived;
+
             LoadAllProducts();
             SwitchChannelTab(Channel.DineIn, reloadFromDb: true);
 
             // Tự động bật luồng lắng nghe lệnh Telegram 2 chiều (/homnay, /homqua, /ban, /huymon)
             new TelegramBotService().StartTwoWayListener();
+        }
+
+        // Lắng nghe sự kiện Realtime từ TCP Server đẩy về (< 1 giây)
+        private void OnTcpServerEventReceived(string msgType, string payload)
+        {
+            if (this.IsDisposed || !this.IsHandleCreated) return;
+
+            this.BeginInvoke(new Action(() =>
+            {
+                if (msgType == MsgType.TABLE_STATUS_CHANGED || msgType == MsgType.KDS_ITEM_DONE)
+                {
+                    RefreshAll(reloadTablesFromDb: true);
+                }
+                else if (msgType == MsgType.MENU_UPDATED)
+                {
+                    LoadAllProducts();
+                }
+            }));
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            _netClient.OnServerEventReceived -= OnTcpServerEventReceived;
+            base.OnFormClosing(e);
         }
 
         // ==================== HÀM KIỂM TRA & LÀM MỚI DỮ LIỆU ====================
@@ -3065,7 +5445,7 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 if (reloadFromDb || _cachedTables.Count == 0)
                 {
-                    _cachedTables = _posDal.GetAllTables();
+                    _cachedTables = _netClient.GetAllTables();
                 }
 
                 ClearAndDispose(flpTables);
@@ -3108,7 +5488,7 @@ namespace QuanLyCafe_Nhom8.GUI
         {
             try
             {
-                _allProducts = _posDal.GetActiveProducts();
+                _allProducts = _netClient.GetActiveProducts();
                 BindProductList(_allProducts);
             }
             catch (Exception ex)
@@ -3147,14 +5527,12 @@ namespace QuanLyCafe_Nhom8.GUI
                 _selectedTableId = table.TableId;
                 _selectedTableName = table.TableName;
 
-                // Khôi phục % giảm giá đã duyệt của riêng bàn này
                 _approvedDiscountPercent = _tableDiscounts.TryGetValue(_selectedTableId, out int savedDiscount) ? savedDiscount : 0;
                 nudDiscount.Value = _approvedDiscountPercent;
 
                 lblSelectedTable.Text = $"ĐANG PHỤC VỤ: {_selectedTableName.ToUpper()} ({table.Status})";
                 picVietQR.Image = null;
 
-                // Chỉ vẽ lại viền chọn bàn từ bộ nhớ đệm, không gọi lại DB
                 LoadTablesToBoard(reloadFromDb: false);
                 LoadBillForSelectedTable();
             }
@@ -3166,7 +5544,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             try
             {
-                DataTable dt = _posDal.GetBillDetailsByTable(_selectedTableId);
+                DataTable dt = _netClient.GetBillDetailsByTable(_selectedTableId);
                 dgvBillDetails.DataSource = dt;
                 if (dgvBillDetails.Columns["BillDetailId"] != null)
                 {
@@ -3201,9 +5579,9 @@ namespace QuanLyCafe_Nhom8.GUI
                 : $"TỔNG THANH TOÁN: {FinalTotal:N0} VNĐ";
         }
 
-        // ==================== SỰ KIỆN NGHIỆP VỤ POS ====================
+        // ==================== SỰ KIỆN NGHIỆP VỤ POS QUA TCP NETWORKCLIENT ====================
 
-        private void btnAddItem_Click(object sender, EventArgs e)
+        private async void btnAddItem_Click(object sender, EventArgs e)
         {
             if (_selectedTableId == -1)
             {
@@ -3216,32 +5594,40 @@ namespace QuanLyCafe_Nhom8.GUI
                 return;
             }
 
+            Button btn = sender as Button;
             try
             {
+                if (btn != null) btn.Enabled = false;
                 int productId = Convert.ToInt32(cboProducts.SelectedValue);
                 int quantity = Convert.ToInt32(nudQuantity.Value);
 
-                _posDal.AddItemToTable(_selectedTableId, productId, quantity);
+                await _netClient.AddItemToTableAsync(_selectedTableId, productId, quantity);
                 RefreshAll();
             }
             catch (Exception ex)
             {
                 ShowError("Lỗi khi thêm món: " + ex.Message);
             }
+            finally
+            {
+                if (btn != null) btn.Enabled = true;
+            }
         }
 
-        private void btnSendKitchen_Click(object sender, EventArgs e)
+        private async void btnSendKitchen_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Chưa có món nào trong bàn để gửi pha chế!")) return;
 
+            Button btn = sender as Button;
             try
             {
-                int sentCount = _posDal.SendTableOrderToKitchen(_selectedTableId);
+                if (btn != null) btn.Enabled = false;
+                int sentCount = await _netClient.SendTableOrderToKitchenAsync(_selectedTableId, _selectedTableName);
                 if (sentCount > 0)
                 {
                     SmartPaymentService.PlaySuccessSound();
                     LoadBillForSelectedTable();
-                    Info($"Đã gửi {sentCount} món của [{_selectedTableName}] xuống quầy pha chế!", "Đã gửi pha chế");
+                    Info($"Đã đẩy {sentCount} món của [{_selectedTableName}] qua TCP Socket xuống màn hình Quầy Pha Chế!", "Đã gửi pha chế (TCP)");
                 }
                 else
                 {
@@ -3252,9 +5638,13 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 ShowError("Lỗi khi gửi pha chế: " + ex.Message);
             }
+            finally
+            {
+                if (btn != null) btn.Enabled = true;
+            }
         }
 
-        private void btnRemoveItem_Click(object sender, EventArgs e)
+        private async void btnRemoveItem_Click(object sender, EventArgs e)
         {
             if (_selectedTableId == -1 || dgvBillDetails.CurrentRow == null)
             {
@@ -3278,11 +5668,12 @@ namespace QuanLyCafe_Nhom8.GUI
 
             try
             {
-                _posDal.RemoveBillDetailItem(billDetailId, _selectedTableId);
+                await _netClient.RemoveBillDetailItemAsync(billDetailId, _selectedTableId, _selectedTableName, itemName, isSentToKitchen, managerName);
                 RefreshAll();
 
                 if (isSentToKitchen)
                 {
+                    Info($"Đã hủy món [{itemName}] (Duyệt bởi Quản lý: {managerName}).\nCảnh báo hủy món đã được phát qua Kênh Chat Nội Bộ TCP!", "Đã hủy món");
                     try
                     {
                         new TelegramBotService().GuiTin(
@@ -3328,7 +5719,7 @@ namespace QuanLyCafe_Nhom8.GUI
             Info($"Đã duyệt giảm giá {_approvedDiscountPercent}% bởi Quản lý: {managerName}!", "Thành công");
         }
 
-        private void btnMoveTable_Click(object sender, EventArgs e)
+        private async void btnMoveTable_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Vui lòng chọn bàn đang có khách cần chuyển đi!")) return;
 
@@ -3338,7 +5729,7 @@ namespace QuanLyCafe_Nhom8.GUI
             try
             {
                 int oldTableId = _selectedTableId;
-                _posDal.MoveToEmptyTable(oldTableId, targetTable.TableId);
+                await _netClient.MoveToEmptyTableAsync(oldTableId, targetTable.TableId);
 
                 if (_tableDiscounts.TryGetValue(oldTableId, out int discount))
                 {
@@ -3357,7 +5748,7 @@ namespace QuanLyCafe_Nhom8.GUI
             }
         }
 
-        private void btnMergeTable_Click(object sender, EventArgs e)
+        private async void btnMergeTable_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Vui lòng chọn bàn đang có khách cần gộp!")) return;
 
@@ -3367,7 +5758,7 @@ namespace QuanLyCafe_Nhom8.GUI
             try
             {
                 int sourceTableId = _selectedTableId;
-                _posDal.MergeOccupiedTables(sourceTableId, targetTable.TableId);
+                await _netClient.MergeOccupiedTablesAsync(sourceTableId, targetTable.TableId);
 
                 _tableDiscounts.Remove(sourceTableId);
                 _tableDiscounts.Remove(targetTable.TableId);
@@ -3387,13 +5778,21 @@ namespace QuanLyCafe_Nhom8.GUI
 
         private void btnGenerateQR_Click(object sender, EventArgs e)
         {
-            if (!EnsureHasBill("Bàn / Đơn này chưa có hóa đơn cần thanh toán!")) return;
+            if (_selectedTableId == -1)
+            {
+                ShowWarning("Vui lòng chọn bàn hoặc đơn hàng cần thanh toán!");
+                return;
+            }
+            if (FinalTotal <= 0)
+            {
+                ShowWarning("Bàn này chưa có món nào để tạo mã QR!");
+                return;
+            }
 
-            cboPaymentMethod.SelectedIndex = 1;
-            string qrUrl = SmartPaymentService.BuildVietQrUrl(FinalTotal, _selectedTableName);
-            picVietQR.LoadAsync(qrUrl);
+            // Gọi VietQR API v2 (POST JSON -> Base64ToImage) và hiển thị lên PictureBox
+            cboPaymentMethod.SelectedItem = "Chuyển khoản QR";
+            LoadQrImageSafe(picVietQR, FinalTotal, _selectedTableName);
         }
-
         private void btnPrintBill_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Chưa có hóa đơn để in!")) return;
@@ -3401,7 +5800,7 @@ namespace QuanLyCafe_Nhom8.GUI
             try
             {
                 string method = cboPaymentMethod.SelectedItem?.ToString() ?? "Tiền mặt";
-                DataTable dtItems = _posDal.GetBillDetailsByTable(_selectedTableId);
+                DataTable dtItems = _netClient.GetBillDetailsByTable(_selectedTableId);
                 string receiptContent = BuildReceiptText(dtItems, method);
                 ShowReceiptPreviewDialog(receiptContent);
             }
@@ -3411,7 +5810,7 @@ namespace QuanLyCafe_Nhom8.GUI
             }
         }
 
-        private void btnConfirmPayment_Click(object sender, EventArgs e)
+        private async void btnConfirmPayment_Click(object sender, EventArgs e)
         {
             if (!EnsureHasBill("Không có hóa đơn để thanh toán!")) return;
 
@@ -3428,7 +5827,8 @@ namespace QuanLyCafe_Nhom8.GUI
 
             try
             {
-                if (_posDal.CheckoutTable(_selectedTableId, _approvedDiscountPercent, paymentMethod, out decimal finalPaid))
+                CheckoutResponseDTO res = await _netClient.CheckoutTableAsync(_selectedTableId, _selectedTableName, _approvedDiscountPercent, paymentMethod);
+                if (res.IsSuccess)
                 {
                     string paidTableName = _selectedTableName;
                     _tableDiscounts.Remove(_selectedTableId);
@@ -3439,7 +5839,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
                     RefreshAll();
                     SmartPaymentService.PlaySuccessSound();
-                    Info($"Đã thanh toán thành công {paidTableName}!\n- Số tiền: {finalPaid:N0} VNĐ\n- Nguồn tiền: {paymentMethod}\n- Trạng thái: Bàn đã Trống.", "Hoàn tất");
+                    Info($"Đã thanh toán thành công {paidTableName}!\n- Số tiền: {res.FinalAmount:N0} VNĐ\n- Nguồn tiền: {paymentMethod}\n- Trạng thái: Bàn đã Trống.", "Hoàn tất");
                 }
                 else
                 {
@@ -3627,6 +6027,53 @@ namespace QuanLyCafe_Nhom8.GUI
             panel.ResumeLayout();
         }
 
+        /// <summary>
+        /// Hàm nạp ảnh VietQR từ API v2 (Base64 -> Image) vào PictureBox an toàn, không dùng LoadAsync để tránh lỗi dấu X đỏ
+        /// </summary>
+        private void LoadQrImageSafe(PictureBox targetBox, decimal amount, string tableName)
+        {
+            if (targetBox == null) return;
+            try
+            {
+                Cursor.Current = Cursors.WaitCursor;
+                Bitmap qrBmp = SmartPaymentService.GetQrBitmap(amount, tableName);
+
+                Image oldImg = targetBox.Image;
+                targetBox.Image = qrBmp;
+                if (oldImg != null && !ReferenceEquals(oldImg, qrBmp))
+                {
+                    oldImg.Dispose();
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowError("Lỗi tạo mã VietQR: " + ex.Message, "Lỗi VietQR");
+            }
+            finally
+            {
+                Cursor.Current = Cursors.Default;
+       
+            }
+        }
+
+
+        private Bitmap LoadQrImageSafe(decimal amount, string tableName)
+        {
+            try
+            {
+                return SmartPaymentService.GetQrBitmap(amount, tableName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Không thể tạo mã VietQR: " + ex.Message, "Lỗi VietQR API", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return null;
+            }
+        }
+
+        private void ShowWarning(string message)
+        {
+            MessageBox.Show(this, message, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
         // ==================== DỰNG BỐ CỤC 3 CỘT MÀN HÌNH POS ====================
 
         private void BuildModernPosInterface()
@@ -3643,19 +6090,22 @@ namespace QuanLyCafe_Nhom8.GUI
             Label lblBrand = new Label
             {
                 Text = "☕ COFFEE FEFA - NHÓM 8",
-                Font = Theme.Brand,
+                Font = new Font("Segoe UI", 12f, FontStyle.Bold),
                 ForeColor = Theme.CreamText,
-                Location = new Point(18, 15),
+                Location = new Point(12, 18),
                 AutoSize = true
             };
 
+            Button btnOpenChat = MakeButton("💬 Chat ", new Point(242, 11), new Size(106, 38), Theme.Blue, (s, e) =>
+            {
+                NetworkClient.Instance.ShowInAppChatAndStatsDialog(this, this.Text.Contains("Admin") ? "Quản lý" : "Thu ngân");
+            });
+
             Button btnOpenKDS = MakeButton("🔔 Màn hình Pha chế", new Point(630, 11), new Size(205, 38), Theme.Orange, (s, e) =>
             {
-                using (FrmKDS kdsForm = new FrmKDS())
-                {
-                    kdsForm.ShowDialog(this);
-                }
-                LoadBillForSelectedTable();
+                FrmKDS kdsForm = new FrmKDS();
+                kdsForm.TopMost = true;
+                kdsForm.Show();
             });
 
             Button btnOpenMenu = MakeButton("📋 Quản lý Thực đơn", new Point(855, 11), new Size(205, 38), Theme.Green, (s, e) =>
@@ -3667,14 +6117,15 @@ namespace QuanLyCafe_Nhom8.GUI
                 LoadAllProducts();
             });
 
-            Button btnOpenStats = MakeButton("📊 Thống kê & Telegram", new Point(1070, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
+            Button btnOpenStats = MakeButton("📊 Thống kê Doanh thu", new Point(1070, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
             {
                 using (FrmStatistics frm = new FrmStatistics())
                 {
                     frm.ShowDialog(this);
                 }
             });
-            pnlTopHeader.Controls.AddRange(new Control[] { lblBrand, btnOpenKDS, btnOpenMenu, btnOpenStats });
+
+            pnlTopHeader.Controls.AddRange(new Control[] { lblBrand, btnOpenChat, btnOpenKDS, btnOpenMenu, btnOpenStats });
 
             // 2. CỘT TRÁI: KÊNH BÁN HÀNG & SƠ ĐỒ BÀN
             Panel pnlLeft = new Panel { Location = new Point(15, 72), Size = new Size(455, 680), BackColor = Color.White };
@@ -3941,7 +6392,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
                 try
                 {
-                    if (_posDal.VerifyManagerAccount(txtUser.Text.Trim(), txtPass.Text, out approvedBy))
+                    if (_netClient.VerifyManagerAccount(txtUser.Text.Trim(), txtPass.Text, out approvedBy))
                     {
                         return true;
                     }
@@ -4104,7 +6555,7 @@ namespace QuanLyCafe_Nhom8.GUI
             sb.AppendLine("        CAFE FEFA - NHÓM 8");
             sb.AppendLine("      ĐC: Công Viên Thủy Tinh ");
             sb.AppendLine("==========================================");
-            sb.AppendLine("         PHIẾU TẠM TÍNH / HÓA ĐƠN");
+            sb.AppendLine("          PHIẾU TẠM TÍNH / HÓA ĐƠN");
             sb.AppendLine($"Bàn / Đơn : {_selectedTableName}");
             sb.AppendLine($"Thời gian : {DateTime.Now:dd/MM/yyyy HH:mm:ss}");
             sb.AppendLine($"Hình thức : {method}");
@@ -4164,6 +6615,15 @@ namespace QuanLyCafe_Nhom8.GUI
                     BorderStyle = BorderStyle.FixedSingle
                 };
 
+                // Nếu ngoài màn hình chính đã tạo VietQR thì lấy luôn, chưa có thì gọi API tạo mới
+                if (picVietQR.Image != null)
+                {
+                    picBillQR.Image = (Image)picVietQR.Image.Clone();
+                }
+                else
+                {
+                    LoadQrImageSafe(picBillQR, FinalTotal, _selectedTableName);
+                }
                 // Nạp trực tiếp Bitmap hợp lệ, tuyệt đối không dùng LoadAsync hoặc lấy nhầm ErrorImage (dấu X đỏ)
                 Bitmap validQrBmp = (picVietQR.Image != null && picVietQR.Image != picVietQR.ErrorImage && picVietQR.Image.Width > 100)
                     ? new Bitmap(picVietQR.Image)
@@ -5115,24 +7575,6 @@ namespace QuanLyCafe_Nhom8.GUI
         {
             MessageBox.Show(bot.BaoHuyMon());
         }
-
-        private void InitializeComponent()
-        {
-            this.SuspendLayout();
-            // 
-            // FrmStatistics
-            // 
-            this.ClientSize = new System.Drawing.Size(282, 253);
-            this.Name = "FrmStatistics";
-            this.Load += new System.EventHandler(this.FrmStatistics_Load);
-            this.ResumeLayout(false);
-
-        }
-
-        private void FrmStatistics_Load(object sender, EventArgs e)
-        {
-
-        }
     }
 }
 
@@ -5381,6 +7823,737 @@ namespace QuanLyCafe_Nhom8.Services
 
 
 /* =========================================
+   FILE: NetworkClient.cs 
+========================================= */
+
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Data;
+using System.Drawing;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using QuanLyCafe_Nhom8.DAL;
+using QuanLyCafe_Nhom8.DTO;
+
+namespace QuanLyCafe_Nhom8.Services
+{
+    // Danh sách các loại thông điệp (MsgType) theo Hợp đồng BE-FE v1.0
+    public static class MsgType
+    {
+        public const string PING = "PING";
+        public const string PONG = "PONG";
+        public const string TABLE_STATUS_CHANGED = "TABLE_STATUS_CHANGED";
+        public const string MENU_UPDATED = "MENU_UPDATED";
+        public const string KDS_NEW_ORDER = "KDS_NEW_ORDER";
+        public const string KDS_ITEM_DONE = "KDS_ITEM_DONE";
+        public const string GET_PENDING_KDS = "GET_PENDING_KDS";
+        public const string CHAT_MESSAGE = "CHAT_MESSAGE";
+        public const string STATS_COMMAND = "STATS_COMMAND";
+    }
+
+    // Thực hiện UDP Broadcast để tự động tìm IP:Port của Server trong mạng LAN
+    public static class UdpDiscoveryClient
+    {
+        public const int UdpDiscoveryPort = 8889;
+        public const int DefaultTcpPort = 8888;
+
+        public static async Task<IPEndPoint> DiscoverServerAsync(int timeoutMs = 1200)
+        {
+            return await Task.Run(() =>
+            {
+                try
+                {
+                    using (UdpClient udp = new UdpClient())
+                    {
+                        udp.EnableBroadcast = true;
+                        udp.Client.ReceiveTimeout = timeoutMs;
+
+                        byte[] reqBytes = Encoding.UTF8.GetBytes("COFFEE_FEFA_DISCOVER_REQ");
+                        IPEndPoint broadcastEp = new IPEndPoint(IPAddress.Broadcast, UdpDiscoveryPort);
+                        udp.Send(reqBytes, reqBytes.Length, broadcastEp);
+
+                        IPEndPoint remoteEp = new IPEndPoint(IPAddress.Any, 0);
+                        byte[] respBytes = udp.Receive(ref remoteEp);
+                        string resp = Encoding.UTF8.GetString(respBytes).Trim();
+
+                        // Phản hồi từ UDP Responder dạng: COFFEE_FEFA_SERVER|192.168.1.10|8888
+                        if (resp.StartsWith("COFFEE_FEFA_SERVER", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string[] parts = resp.Split('|');
+                            if (parts.Length >= 3 && IPAddress.TryParse(parts[1], out IPAddress ip) && int.TryParse(parts[2], out int port))
+                            {
+                                return new IPEndPoint(ip, port);
+                            }
+                            return new IPEndPoint(remoteEp.Address, DefaultTcpPort);
+                        }
+                    }
+                }
+                catch
+                {
+                    // Fallback về Loopback 127.0.0.1 nếu Firewall chặn Broadcast
+                }
+                return new IPEndPoint(IPAddress.Loopback, DefaultTcpPort);
+            });
+        }
+    }
+
+    // Thư viện NetworkClient dùng chung cho toàn bộ các màn hình Client (TCP Length-Prefix 4 byte + Auto-Reconnect + Heartbeat)
+    public sealed class NetworkClient
+    {
+        private static readonly Lazy<NetworkClient> _instance = new Lazy<NetworkClient>(() => new NetworkClient());
+        public static NetworkClient Instance => _instance.Value;
+
+        public const int MaxPayloadSize = 1024 * 1024; // Giới hạn gói tin <= 1MB chống tràn bộ nhớ
+        private TcpClient _tcpClient;
+        private NetworkStream _stream;
+        private readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1, 1);
+        private CancellationTokenSource _cts;
+        private bool _isStarted = false;
+
+        public string ServerHost { get; private set; } = "127.0.0.1";
+        public int ServerPort { get; private set; } = UdpDiscoveryClient.DefaultTcpPort;
+        public bool IsConnected => _tcpClient != null && _tcpClient.Connected;
+
+        // Sự kiện đẩy về cho các Form (FrmMainPOS, FrmKDS, FrmChat) đăng ký nhận Realtime
+        public event Action<string, string> OnServerEventReceived;
+        public event Action<bool, string> OnConnectionStateChanged;
+
+        // Lưu lịch sử Chat & Thống kê nội bộ trong phiên làm việc
+        public readonly List<string> ChatHistory = new List<string>();
+
+        private readonly PosServiceDAL _posDal = new PosServiceDAL();
+
+        private NetworkClient() { }
+
+        // Khởi động cả Embedded TCP/UDP Server (nếu máy hiện tại đóng vai Server) và kết nối TcpSessionClient
+        public void Start()
+        {
+            if (_isStarted) return;
+            _isStarted = true;
+
+            EmbeddedLanServer.EnsureRunning();
+            _cts = new CancellationTokenSource();
+            Task.Run(() => MaintainConnectionLoopAsync(_cts.Token));
+            Task.Run(() => HeartbeatLoopAsync(_cts.Token));
+        }
+
+        // Vòng lặp tự động tìm Server qua UDP, kết nối TCP và tự động Reconnect khi rớt mạng
+        private async Task MaintainConnectionLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                if (!IsConnected)
+                {
+                    try
+                    {
+                        IPEndPoint ep = await UdpDiscoveryClient.DiscoverServerAsync(800);
+                        ServerHost = ep.Address.ToString();
+                        ServerPort = ep.Port;
+
+                        _tcpClient?.Close();
+                        _tcpClient = new TcpClient();
+                        await _tcpClient.ConnectAsync(ServerHost, ServerPort);
+                        _stream = _tcpClient.GetStream();
+
+                        OnConnectionStateChanged?.Invoke(true, $"Đã kết nối TCP ({ServerHost}:{ServerPort})");
+
+                        // Bắt đầu đọc luồng khung 4-byte Length-Prefix từ Server
+                        await ReceiveLoopAsync(token);
+                    }
+                    catch
+                    {
+                        OnConnectionStateChanged?.Invoke(false, "Đang tự động kết nối lại TCP Server...");
+                    }
+                }
+                await Task.Delay(2500, token);
+            }
+        }
+
+        // Vòng lặp gửi Heartbeat PING định kỳ mỗi 10 giây
+        private async Task HeartbeatLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                await Task.Delay(10000, token);
+                if (IsConnected)
+                {
+                    await SendFrameAsync(MsgType.PING, "PING");
+                }
+            }
+        }
+
+        // Gửi gói tin theo đúng chuẩn 4-byte Int32 Length-Prefix + Payload UTF-8
+        public async Task<bool> SendFrameAsync(string msgType, string payload = "")
+        {
+            if (!IsConnected || _stream == null) return false;
+
+            string packet = $"{msgType}|{payload}";
+            byte[] payloadBytes = Encoding.UTF8.GetBytes(packet);
+            if (payloadBytes.Length > MaxPayloadSize) return false;
+
+            byte[] lengthPrefix = BitConverter.GetBytes(payloadBytes.Length);
+
+            await _writeLock.WaitAsync();
+            try
+            {
+                await _stream.WriteAsync(lengthPrefix, 0, 4);
+                await _stream.WriteAsync(payloadBytes, 0, payloadBytes.Length);
+                await _stream.FlushAsync();
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                _writeLock.Release();
+            }
+        }
+
+        // Đọc chính xác 4 byte header độ dài trước, sau đó đọc đủ N byte payload chống dính/phân mảnh gói TCP
+        private async Task ReceiveLoopAsync(CancellationToken token)
+        {
+            byte[] lenBuffer = new byte[4];
+
+            while (!token.IsCancellationRequested && IsConnected)
+            {
+                int readHeader = await ReadExactBytesAsync(_stream, lenBuffer, 4, token);
+                if (readHeader < 4) break;
+
+                int payloadLength = BitConverter.ToInt32(lenBuffer, 0);
+                if (payloadLength <= 0 || payloadLength > MaxPayloadSize) break;
+
+                byte[] payloadBuffer = new byte[payloadLength];
+                int readPayload = await ReadExactBytesAsync(_stream, payloadBuffer, payloadLength, token);
+                if (readPayload < payloadLength) break;
+
+                string rawPacket = Encoding.UTF8.GetString(payloadBuffer);
+                int sepIndex = rawPacket.IndexOf('|');
+                string msgType = sepIndex >= 0 ? rawPacket.Substring(0, sepIndex) : rawPacket;
+                string content = sepIndex >= 0 ? rawPacket.Substring(sepIndex + 1) : "";
+
+                if (msgType == MsgType.PONG) continue;
+
+                if (msgType == MsgType.CHAT_MESSAGE)
+                {
+                    lock (ChatHistory)
+                    {
+                        ChatHistory.Add(content);
+                    }
+                }
+
+                OnServerEventReceived?.Invoke(msgType, content);
+            }
+
+            OnConnectionStateChanged?.Invoke(false, "Mất kết nối TCP - Đang kết nối lại...");
+        }
+
+        private static async Task<int> ReadExactBytesAsync(NetworkStream stream, byte[] buffer, int count, CancellationToken token)
+        {
+            int totalRead = 0;
+            while (totalRead < count)
+            {
+                int read = await stream.ReadAsync(buffer, totalRead, count - totalRead, token);
+                if (read <= 0) return totalRead;
+                totalRead += read;
+            }
+            return totalRead;
+        }
+
+        // ==================== CÁC HÀM GỌI NGHIỆP VỤ POS & KDS QUA NETWORKCLIENT ====================
+
+        public List<TableDTO> GetAllTables() => _posDal.GetAllTables();
+
+        public List<ProductDTO> GetActiveProducts() => _posDal.GetActiveProducts();
+
+        public DataTable GetBillDetailsByTable(int tableId) => _posDal.GetBillDetailsByTable(tableId);
+
+        public bool VerifyManagerAccount(string username, string password, out string managerFullName) =>
+            _posDal.VerifyManagerAccount(username, password, out managerFullName);
+
+        public async Task AddItemToTableAsync(int tableId, int productId, int quantity)
+        {
+            await Task.Run(() => _posDal.AddItemToTable(tableId, productId, quantity));
+            await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, tableId.ToString());
+        }
+
+        public async Task<int> SendTableOrderToKitchenAsync(int tableId, string tableName)
+        {
+            int count = await Task.Run(() => _posDal.SendTableOrderToKitchen(tableId));
+            if (count > 0)
+            {
+                await SendFrameAsync(MsgType.KDS_NEW_ORDER, $"{tableId}|{tableName}|{count}");
+                await SendFrameAsync(MsgType.CHAT_MESSAGE, $"[Quầy Thu Ngân]: Đã gửi {count} món của {tableName} xuống Quầy Pha Chế!");
+            }
+            return count;
+        }
+
+        public async Task RemoveBillDetailItemAsync(int billDetailId, int tableId, string tableName, string itemName, bool isSentToKitchen, string managerName)
+        {
+            await Task.Run(() => _posDal.RemoveBillDetailItem(billDetailId, tableId));
+            await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, tableId.ToString());
+            await SendFrameAsync(MsgType.KDS_NEW_ORDER, tableId.ToString());
+
+            if (isSentToKitchen)
+            {
+                string alert = $"⚠️ [CẢNH BÁO HỦY MÓN] Bàn: {tableName} | Món: {itemName} | Duyệt bởi: {managerName} ({DateTime.Now:HH:mm:ss})";
+                await SendFrameAsync(MsgType.CHAT_MESSAGE, alert);
+            }
+        }
+
+        public async Task MoveToEmptyTableAsync(int sourceTableId, int targetTableId)
+        {
+            await Task.Run(() => _posDal.MoveToEmptyTable(sourceTableId, targetTableId));
+            await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, $"{sourceTableId},{targetTableId}");
+        }
+
+        public async Task MergeOccupiedTablesAsync(int sourceTableId, int targetTableId)
+        {
+            await Task.Run(() => _posDal.MergeOccupiedTables(sourceTableId, targetTableId));
+            await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, $"{sourceTableId},{targetTableId}");
+        }
+
+        public async Task<CheckoutResponseDTO> CheckoutTableAsync(int tableId, string tableName, int discountPercent, string paymentMethod)
+        {
+            decimal finalPaid = 0;
+            bool ok = await Task.Run(() => _posDal.CheckoutTable(tableId, discountPercent, paymentMethod, out finalPaid));
+            if (ok)
+            {
+                await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, tableId.ToString());
+                await SendFrameAsync(MsgType.CHAT_MESSAGE, $"💰 [THANH TOÁN] {tableName}: +{finalPaid:N0} VNĐ ({paymentMethod})");
+            }
+            return new CheckoutResponseDTO
+            {
+                IsSuccess = ok,
+                TableId = tableId,
+                FinalAmount = finalPaid
+            };
+        }
+
+        public DataTable GetPendingKitchenItems() => _posDal.GetPendingKitchenItems();
+
+        public async Task MarkKitchenItemDoneAsync(int billDetailId, string tableName, string productName)
+        {
+            await Task.Run(() => _posDal.MarkKitchenItemDone(billDetailId));
+            await SendFrameAsync(MsgType.KDS_ITEM_DONE, $"{billDetailId}|{tableName}|{productName}");
+            await SendFrameAsync(MsgType.CHAT_MESSAGE, $"✅ [Quầy Pha Chế]: Đã làm xong món [{productName}] cho [{tableName}]!");
+        }
+
+        // ==================== CỬA SỔ CHAT NỘI BỘ & TRA CỨU THỐNG KÊ TRÊN APP (THAY TELEGRAM BOT) ====================
+
+        private Form _activeChatForm = null;
+
+        public void ShowInAppChatAndStatsDialog(Form parentForm, string currentRoleName = "Quản lý / Thu ngân")
+        {
+            // Nếu cửa sổ Chat đang mở sẵn thì đưa lên trên cùng, cho phép kéo thả song song với màn hình POS
+            if (_activeChatForm != null && !_activeChatForm.IsDisposed)
+            {
+                _activeChatForm.BringToFront();
+                _activeChatForm.Focus();
+                return;
+            }
+
+            Form chatForm = new Form
+            {
+                Text = $"Chat Nội Bộ LAN & Bot Thống Kê Trên App (TCP {ServerHost}:{ServerPort})",
+                Size = new Size(760, 560),
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(560, 140),
+                BackColor = Color.FromArgb(244, 239, 234)
+            };
+            _activeChatForm = chatForm;
+
+            Panel pnlHeader = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 56,
+                BackColor = Color.FromArgb(62, 39, 35)
+            };
+
+            Label lblHeader = new Label
+            {
+                Text = "💬 KÊNH CHAT NỘI BỘ LAN && TRA CỨU THỐNG KÊ NHANH TRÊN APP",
+                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(255, 224, 178),
+                Location = new Point(16, 16),
+                AutoSize = true
+            };
+            pnlHeader.Controls.Add(lblHeader);
+
+            RichTextBox rtbChat = new RichTextBox
+            {
+                Location = new Point(16, 70),
+                Size = new Size(710, 340),
+                ReadOnly = true,
+                BackColor = Color.White,
+                Font = new Font("Segoe UI", 10f),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            // 4 nút lệnh vừa vặn chiều rộng, không bị khuất chữ
+            Button btnCmdToday = CreateQuickCmdButton("📊 /homnay (Hôm nay)", new Point(16, 420), 172, async () =>
+                await SendFrameAsync(MsgType.STATS_COMMAND, "/homnay"));
+
+            Button btnCmdYesterday = CreateQuickCmdButton("📅 /homqua (Hôm qua)", new Point(195, 420), 172, async () =>
+                await SendFrameAsync(MsgType.STATS_COMMAND, "/homqua"));
+
+            Button btnCmdTables = CreateQuickCmdButton("☕ /ban (Bàn có khách)", new Point(374, 420), 172, async () =>
+                await SendFrameAsync(MsgType.STATS_COMMAND, "/ban"));
+
+            Button btnCmdCancelLog = CreateQuickCmdButton("⚠️ /huymon (Hủy món)", new Point(553, 420), 173, async () =>
+                await SendFrameAsync(MsgType.STATS_COMMAND, "/huymon"));
+
+            TextBox txtMsg = new TextBox
+            {
+                Location = new Point(16, 466),
+                Size = new Size(575, 32),
+                Font = new Font("Segoe UI", 10.5f)
+            };
+
+            Button btnSend = new Button
+            {
+                Text = "Gửi TCP ➔",
+                Location = new Point(600, 464),
+                Size = new Size(126, 34),
+                BackColor = Color.FromArgb(39, 174, 96),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btnSend.FlatAppearance.BorderSize = 0;
+
+            Action refreshChatBox = () =>
+            {
+                if (rtbChat.IsDisposed) return;
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine("💡 MẸO: Bấm các nút bên dưới hoặc gõ /homnay, /homqua, /ban, /huymon để tra cứu qua TCP Socket!");
+                sb.AppendLine("--------------------------------------------------------------------------------");
+                lock (ChatHistory)
+                {
+                    foreach (string line in ChatHistory)
+                    {
+                        sb.AppendLine(line);
+                        sb.AppendLine();
+                    }
+                }
+                rtbChat.Text = sb.ToString();
+                rtbChat.SelectionStart = rtbChat.Text.Length;
+                rtbChat.ScrollToCaret();
+            };
+
+            Action<string, string> eventHandler = (type, payload) =>
+            {
+                if (type == MsgType.CHAT_MESSAGE && !chatForm.IsDisposed && chatForm.IsHandleCreated)
+                {
+                    chatForm.BeginInvoke(new Action(refreshChatBox));
+                }
+            };
+
+            OnServerEventReceived += eventHandler;
+            chatForm.FormClosing += (s, e) => OnServerEventReceived -= eventHandler;
+
+            Func<Task> sendAction = async () =>
+            {
+                string raw = txtMsg.Text.Trim();
+                if (string.IsNullOrEmpty(raw)) return;
+                txtMsg.Clear();
+
+                if (raw.StartsWith("/"))
+                {
+                    await SendFrameAsync(MsgType.STATS_COMMAND, raw);
+                }
+                else
+                {
+                    await SendFrameAsync(MsgType.CHAT_MESSAGE, $"[{currentRoleName} - {DateTime.Now:HH:mm}]: {raw}");
+                }
+            };
+
+            btnSend.Click += async (s, e) => await sendAction();
+            txtMsg.KeyDown += async (s, e) =>
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    await sendAction();
+                }
+            };
+
+            refreshChatBox();
+
+            chatForm.Controls.AddRange(new Control[]
+            {
+                pnlHeader, rtbChat,
+                btnCmdToday, btnCmdYesterday, btnCmdTables, btnCmdCancelLog,
+                txtMsg, btnSend
+            });
+
+            // Mở dạng Non-Modal (.Show) để người dùng vừa để bảng Chat vừa bấm & kéo thả màn hình POS bên dưới
+            chatForm.TopMost = true;
+            chatForm.Show(parentForm);
+        }
+
+        private static Button CreateQuickCmdButton(string text, Point loc, int width, Func<Task> onClick)
+        {
+            Button btn = new Button
+            {
+                Text = text,
+                Location = loc,
+                Size = new Size(width, 34),
+                BackColor = Color.FromArgb(41, 128, 185),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            btn.Click += async (s, e) => await onClick();
+            return btn;
+        }
+    }
+
+    // Máy chủ TCP Đa luồng & UDP Responder tích hợp sẵn (Giúp điều phối gói tin 4-byte Length-Prefix giữa các Client)
+    internal static class EmbeddedLanServer
+    {
+        private static bool _running = false;
+        private static TcpListener _listener;
+        private static readonly ConcurrentDictionary<Guid, TcpClient> _clients = new ConcurrentDictionary<Guid, TcpClient>();
+
+        public static void EnsureRunning()
+        {
+            if (_running) return;
+            _running = true;
+
+            Task.Run(StartUdpResponderLoop);
+            Task.Run(StartTcpServerLoop);
+        }
+
+        private static void StartUdpResponderLoop()
+        {
+            try
+            {
+                using (UdpClient udpServer = new UdpClient(UdpDiscoveryClient.UdpDiscoveryPort))
+                {
+                    IPEndPoint remoteEp = new IPEndPoint(IPAddress.Any, 0);
+                    while (true)
+                    {
+                        byte[] data = udpServer.Receive(ref remoteEp);
+                        string msg = Encoding.UTF8.GetString(data).Trim();
+                        if (msg == "COFFEE_FEFA_DISCOVER_REQ")
+                        {
+                            string reply = $"COFFEE_FEFA_SERVER|127.0.0.1|{UdpDiscoveryClient.DefaultTcpPort}";
+                            byte[] replyBytes = Encoding.UTF8.GetBytes(reply);
+                            udpServer.Send(replyBytes, replyBytes.Length, remoteEp);
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Cổng UDP đã có tiến trình Server khác lắng nghe
+            }
+        }
+
+        private static async Task StartTcpServerLoop()
+        {
+            try
+            {
+                _listener = new TcpListener(IPAddress.Any, UdpDiscoveryClient.DefaultTcpPort);
+                _listener.Start();
+
+                while (true)
+                {
+                    TcpClient client = await _listener.AcceptTcpClientAsync();
+                    Guid clientId = Guid.NewGuid();
+                    _clients[clientId] = client;
+                    _ = Task.Run(() => HandleClientAsync(clientId, client));
+                }
+            }
+            catch
+            {
+                // Cổng TCP 8888 đã có tiến trình Server riêng lắng nghe
+            }
+        }
+
+        private static async Task HandleClientAsync(Guid clientId, TcpClient client)
+        {
+            try
+            {
+                using (client)
+                using (NetworkStream stream = client.GetStream())
+                {
+                    byte[] lenBuf = new byte[4];
+                    while (client.Connected)
+                    {
+                        int rLen = await ReadExactAsync(stream, lenBuf, 4);
+                        if (rLen < 4) break;
+
+                        int size = BitConverter.ToInt32(lenBuf, 0);
+                        if (size <= 0 || size > NetworkClient.MaxPayloadSize) break;
+
+                        byte[] payloadBuf = new byte[size];
+                        int rPay = await ReadExactAsync(stream, payloadBuf, size);
+                        if (rPay < size) break;
+
+                        string packet = Encoding.UTF8.GetString(payloadBuf);
+                        int idx = packet.IndexOf('|');
+                        string type = idx >= 0 ? packet.Substring(0, idx) : packet;
+                        string body = idx >= 0 ? packet.Substring(idx + 1) : "";
+
+                        if (type == MsgType.PING)
+                        {
+                            await SendSingleClientAsync(client, $"{MsgType.PONG}|PONG");
+                            continue;
+                        }
+
+                        if (type == MsgType.STATS_COMMAND)
+                        {
+                            string report = BuildStatsReportForAppChat(body);
+                            await BroadcastPacketAsync($"{MsgType.CHAT_MESSAGE}|{report}");
+                            continue;
+                        }
+
+                        // Broadcast sự kiện (KDS_NEW_ORDER, KDS_ITEM_DONE, TABLE_STATUS_CHANGED, CHAT_MESSAGE) tới toàn bộ Client
+                        await BroadcastPacketAsync(packet);
+                    }
+                }
+            }
+            catch { }
+            finally
+            {
+                _clients.TryRemove(clientId, out _);
+            }
+        }
+
+        private static async Task BroadcastPacketAsync(string packet)
+        {
+            byte[] payload = Encoding.UTF8.GetBytes(packet);
+            byte[] prefix = BitConverter.GetBytes(payload.Length);
+
+            foreach (var kv in _clients)
+            {
+                try
+                {
+                    if (kv.Value.Connected)
+                    {
+                        NetworkStream ns = kv.Value.GetStream();
+                        await ns.WriteAsync(prefix, 0, 4);
+                        await ns.WriteAsync(payload, 0, payload.Length);
+                        await ns.FlushAsync();
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static async Task SendSingleClientAsync(TcpClient client, string packet)
+        {
+            try
+            {
+                byte[] payload = Encoding.UTF8.GetBytes(packet);
+                byte[] prefix = BitConverter.GetBytes(payload.Length);
+                NetworkStream ns = client.GetStream();
+                await ns.WriteAsync(prefix, 0, 4);
+                await ns.WriteAsync(payload, 0, payload.Length);
+                await ns.FlushAsync();
+            }
+            catch { }
+        }
+
+        private static async Task<int> ReadExactAsync(NetworkStream s, byte[] buf, int count)
+        {
+            int total = 0;
+            while (total < count)
+            {
+                int r = await s.ReadAsync(buf, total, count - total);
+                if (r <= 0) return total;
+                total += r;
+            }
+            return total;
+        }
+
+        // Xử lý lệnh tra cứu thống kê (/homnay, /homqua, /ban, /huymon) ngay trên App Chat qua TCP
+        private static string BuildStatsReportForAppChat(string rawCommand)
+        {
+            string cmd = rawCommand.Trim().ToLowerInvariant().Split(' ')[0];
+            try
+            {
+                if (cmd == "/homnay" || cmd == "/doanhthu")
+                {
+                    return QueryRevenueByDate(DateTime.Today, "HÔM NAY");
+                }
+                if (cmd == "/homqua")
+                {
+                    return QueryRevenueByDate(DateTime.Today.AddDays(-1), "HÔM QUA");
+                }
+                if (cmd == "/ban")
+                {
+                    DataTable dt = DatabaseHelper.ExecuteQuery(@"
+                        SELECT t.TableName, b.TotalAmount
+                        FROM Tables t
+                        INNER JOIN Bills b ON t.TableId = b.TableId
+                        WHERE b.Status = 0");
+                    if (dt.Rows.Count == 0) return "🤖 [BOT THỐNG KÊ APP]: 🟢 Hiện tại tất cả các bàn đều đang TRỐNG.";
+
+                    StringBuilder sb = new StringBuilder();
+                    sb.AppendLine($"🤖 [BOT THỐNG KÊ APP] 🟠 ĐANG PHỤC VỤ {dt.Rows.Count} BÀN / ĐƠN:");
+                    foreach (DataRow r in dt.Rows)
+                    {
+                        sb.AppendLine($"  • {r["TableName"]}: tạm tính {Convert.ToDecimal(r["TotalAmount"]):N0} VNĐ");
+                    }
+                    return sb.ToString().TrimEnd();
+                }
+                if (cmd == "/huymon")
+                {
+                    DataTable dt = DatabaseHelper.ExecuteQuery(@"
+                        SELECT TOP 5 a.BillId, p.ProductName, a.DeletedQuantity, FORMAT(a.LogTime, 'HH:mm:ss') AS GioHuy
+                        FROM AuditLogs a
+                        LEFT JOIN Products p ON a.ProductId = p.ProductId
+                        WHERE CAST(a.LogTime AS DATE) = CAST(GETDATE() AS DATE)
+                        ORDER BY a.LogId DESC");
+                    if (dt.Rows.Count == 0) return "🤖 [BOT THỐNG KÊ APP]: ✅ Hôm nay quán không có thao tác hủy món nào.";
+
+                    StringBuilder sb = new StringBuilder();
+                    sb.AppendLine("🤖 [BOT THỐNG KÊ APP] ⚠️ LỊCH SỬ HỦY MÓN HÔM NAY:");
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        sb.AppendLine($"  • Đơn #{row["BillId"]} | Món: {row["ProductName"]} | SL hủy: {row["DeletedQuantity"]} | Lúc: {row["GioHuy"]}");
+                    }
+                    return sb.ToString().TrimEnd();
+                }
+
+                return "🤖 [BOT THỐNG KÊ APP]: Các lệnh hỗ trợ: /homnay , /homqua , /ban , /huymon";
+            }
+            catch (Exception ex)
+            {
+                return "🤖 [BOT THỐNG KÊ APP] Lỗi truy vấn: " + ex.Message;
+            }
+        }
+
+        private static string QueryRevenueByDate(DateTime date, string title)
+        {
+            var prms = new[] { new System.Data.SqlClient.SqlParameter("@Ngay", date.Date) };
+            DataTable dt = DatabaseHelper.ExecuteQuery(@"
+                SELECT COUNT(*) AS SoDon, ISNULL(SUM(TotalAmount), 0) AS TongTien
+                FROM Bills
+                WHERE Status = 1 AND CAST(CheckOutTime AS DATE) = @Ngay", prms);
+
+            int soDon = Convert.ToInt32(dt.Rows[0]["SoDon"]);
+            decimal tong = Convert.ToDecimal(dt.Rows[0]["TongTien"]);
+            return $"🤖 [BOT THỐNG KÊ APP] 📊 DOANH THU {title} ({date:dd/MM/yyyy}): Tổng {soDon} đơn — Tổng thu: {tong:N0} VNĐ";
+        }
+    }
+}
+
+
+/* =========================================
    FILE: SmartPaymentService.cs 
 ========================================= */
 
@@ -5392,17 +8565,94 @@ using System.IO;
 using System.Media;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace QuanLyCafe_Nhom8.Services
 {
+    public class ApiRequest
+    {
+        public string accountNo { get; set; }
+        public string accountName { get; set; }
+        public int acqId { get; set; }
+        public long amount { get; set; }
+        public string addInfo { get; set; }
+        public string format { get; set; }
+        public string template { get; set; }
+    }
+
     public static class SmartPaymentService
     {
+        public static string BankId = "970436";
+        public static int AcqId = 970436;
         // Thông tin tài khoản Vietcombank chính chủ của Nguyễn Hoàng Duy Anh
         public static string BankId = "970436";
         public static string BankShortName = "Vietcombank";
         public static string AccountNo = "9942886521";
         public static string AccountName = "NGUYEN HOANG DUY ANH";
+        public static string Template = "compact2";
 
+        public static Bitmap GetQrBitmap(decimal amount, string tableName)
+        {
+            long roundedAmount = Convert.ToInt64(Math.Round(amount));
+            string cleanInfo = RemoveVietnameseAccents($"Thanh toan {tableName}").Trim();
+            if (cleanInfo.Length > 25) cleanInfo = cleanInfo.Substring(0, 25);
+
+            string jsonRequest = "{"
+                + $"\"accountNo\":\"{AccountNo}\","
+                + $"\"accountName\":\"{AccountName}\","
+                + $"\"acqId\":{AcqId},"
+                + $"\"amount\":{roundedAmount},"
+                + $"\"addInfo\":\"{cleanInfo}\","
+                + $"\"format\":\"text\","
+                + $"\"template\":\"{Template}\""
+                + "}";
+
+            ServicePointManager.Expect100Continue = true;
+            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | (SecurityProtocolType)3072;
+
+            using (WebClient client = new WebClient())
+            {
+                client.Encoding = Encoding.UTF8;
+                client.Headers[HttpRequestHeader.ContentType] = "application/json";
+                client.Headers[HttpRequestHeader.Accept] = "application/json";
+                client.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+
+                string responseJson = client.UploadString("https://api.vietqr.io/v2/generate", "POST", jsonRequest);
+
+                Match match = Regex.Match(responseJson, @"""qrDataURL""\s*:\s*""([^""]+)""");
+                if (match.Success)
+                {
+                    string qrDataURL = match.Groups[1].Value.Replace(@"\/", "/");
+                    string base64String = qrDataURL.Replace("data:image/png;base64,", "").Trim();
+                    return Base64ToImage(base64String);
+                }
+            }
+
+            throw new Exception("Không nhận được qrDataURL từ máy chủ api.vietqr.io");
+        }
+
+        public static Bitmap Base64ToImage(string base64String)
+        {
+            byte[] imageBytes = Convert.FromBase64String(base64String);
+            using (MemoryStream ms = new MemoryStream(imageBytes, 0, imageBytes.Length))
+            {
+                ms.Write(imageBytes, 0, imageBytes.Length);
+                using (Image img = Image.FromStream(ms, true))
+                {
+                    return new Bitmap(img);
+                }
+            }
+        }
+
+        public static string BuildVietQrUrl(decimal amount, string tableName)
+        {
+            string tempFilePath = Path.Combine(Path.GetTempPath(), $"vietqr_{Guid.NewGuid():N}.png");
+            using (Bitmap bmp = GetQrBitmap(amount, tableName))
+            {
+                bmp.Save(tempFilePath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            return tempFilePath;
+        }
         // Hàm trả về trực tiếp đối tượng Bitmap để gán thẳng vào PictureBox.Image (Không bao giờ bị lỗi X đỏ)
         public static Bitmap GetQrBitmap(decimal amount, string tableName)
         {
@@ -5565,6 +8815,7 @@ namespace QuanLyCafe_Nhom8.Services
 
         private static string RemoveVietnameseAccents(string text)
         {
+            if (string.IsNullOrEmpty(text)) return "Thanh toan";
             string normalized = text.Normalize(NormalizationForm.FormD);
             StringBuilder sb = new StringBuilder();
             foreach (char c in normalized)
@@ -5666,6 +8917,182 @@ namespace QuanLyCafe_Nhom8.Services
         public static void PlaySuccessSound()
         {
             SystemSounds.Asterisk.Play();
+        }
+    }
+}
+
+
+/* =========================================
+   FILE: TcpOrderService.cs 
+========================================= */
+
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace QuanLyCafe_Nhom8.Services
+{
+    public class TcpOrderService
+    {
+        // ================= PHẦN TCP SERVER (DÀNH CHO FrmMainPOS) =================
+        private TcpListener _server;
+        private readonly List<TcpClient> _connectedClients = new List<TcpClient>();
+        private bool _isServerRunning = false;
+
+        public event Action<string> OnServerReceivedMessage;
+        public event Action<int> OnClientCountChanged;
+
+        public void StartServer(int port = 8888)
+        {
+            if (_isServerRunning) return;
+            _isServerRunning = true;
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    _server = new TcpListener(IPAddress.Any, port);
+                    _server.Start();
+
+                    while (_isServerRunning)
+                    {
+                        TcpClient client = await _server.AcceptTcpClientAsync();
+                        lock (_connectedClients)
+                        {
+                            _connectedClients.Add(client);
+                        }
+                        OnClientCountChanged?.Invoke(_connectedClients.Count);
+
+                        // Lắng nghe phản hồi từ Client (KDS báo hoàn thành món)
+                        _ = ListenToClientAsync(client);
+                    }
+                }
+                catch { }
+            });
+        }
+
+        private async Task ListenToClientAsync(TcpClient client)
+        {
+            byte[] buffer = new byte[4096];
+            try
+            {
+                NetworkStream stream = client.GetStream();
+                while (_isServerRunning && client.Connected)
+                {
+                    int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
+                    if (bytesRead == 0) break;
+
+                    string msg = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    OnServerReceivedMessage?.Invoke(msg);
+                }
+            }
+            catch { }
+            finally
+            {
+                lock (_connectedClients)
+                {
+                    _connectedClients.Remove(client);
+                }
+                OnClientCountChanged?.Invoke(_connectedClients.Count);
+            }
+        }
+
+        // Server bắn gói tin sang tất cả màn hình KDS đang kết nối
+        public void BroadcastToClients(string message)
+        {
+            byte[] data = Encoding.UTF8.GetBytes(message);
+            lock (_connectedClients)
+            {
+                for (int i = _connectedClients.Count - 1; i >= 0; i--)
+                {
+                    try
+                    {
+                        if (_connectedClients[i].Connected)
+                        {
+                            NetworkStream stream = _connectedClients[i].GetStream();
+                            stream.Write(data, 0, data.Length);
+                        }
+                    }
+                    catch
+                    {
+                        _connectedClients.RemoveAt(i);
+                    }
+                }
+            }
+        }
+
+        public void StopServer()
+        {
+            _isServerRunning = false;
+            try { _server?.Stop(); } catch { }
+        }
+
+        // ================= PHẦN TCP CLIENT (DÀNH CHO FrmKDS) =================
+        private TcpClient _client;
+        private NetworkStream _clientStream;
+
+        public event Action<string> OnClientReceivedMessage;
+        public event Action<bool> OnConnectionStatusChanged;
+
+        public bool IsClientConnected => _client != null && _client.Connected;
+
+        public async Task<bool> ConnectToServerAsync(string ip = "127.0.0.1", int port = 8888)
+        {
+            try
+            {
+                if (IsClientConnected) return true;
+
+                _client = new TcpClient();
+                await _client.ConnectAsync(ip, port);
+                _clientStream = _client.GetStream();
+                OnConnectionStatusChanged?.Invoke(true);
+
+                // Bắt đầu lắng nghe gói tin từ Server (Thu ngân gửi món mới)
+                _ = Task.Run(async () =>
+                {
+                    byte[] buffer = new byte[4096];
+                    try
+                    {
+                        while (_client != null && _client.Connected)
+                        {
+                            int bytesRead = await _clientStream.ReadAsync(buffer, 0, buffer.Length);
+                            if (bytesRead == 0) break;
+
+                            string msg = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                            OnClientReceivedMessage?.Invoke(msg);
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        OnConnectionStatusChanged?.Invoke(false);
+                    }
+                });
+
+                return true;
+            }
+            catch
+            {
+                OnConnectionStatusChanged?.Invoke(false);
+                return false;
+            }
+        }
+
+        // Client (KDS) bắn gói tin ngược về Server (Thu ngân)
+        public void SendToServer(string message)
+        {
+            try
+            {
+                if (IsClientConnected && _clientStream != null)
+                {
+                    byte[] data = Encoding.UTF8.GetBytes(message);
+                    _clientStream.Write(data, 0, data.Length);
+                }
+            }
+            catch { }
         }
     }
 }

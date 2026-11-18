@@ -133,21 +133,6 @@ namespace QuanLyCafe_Nhom8.GUI
             finally
             {
                 Cursor.Current = Cursors.Default;
-       
-            }
-        }
-
-
-        private Bitmap LoadQrImageSafe(decimal amount, string tableName)
-        {
-            try
-            {
-                return SmartPaymentService.GetQrBitmap(amount, tableName);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Không thể tạo mã VietQR: " + ex.Message, "Lỗi VietQR API", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return null;
             }
         }
 
@@ -155,6 +140,7 @@ namespace QuanLyCafe_Nhom8.GUI
         {
             MessageBox.Show(this, message, "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+
         // ==================== DỰNG BỐ CỤC 3 CỘT MÀN HÌNH POS ====================
 
         private void BuildModernPosInterface()
@@ -382,7 +368,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 BorderStyle = BorderStyle.FixedSingle,
                 SizeMode = PictureBoxSizeMode.Zoom
             };
-            // Khi LoadAsync bị lỗi hoặc ảnh chưa có khung QR, tự động vẽ/nạp QR hợp lệ thay vì báo lỗi và hiện dấu X đỏ
             picVietQR.LoadCompleted += (s, e) =>
             {
                 if (e.Error != null || picVietQR.Image == null || picVietQR.Image == picVietQR.ErrorImage)
@@ -696,21 +681,15 @@ namespace QuanLyCafe_Nhom8.GUI
                     BorderStyle = BorderStyle.FixedSingle
                 };
 
-                // Nếu ngoài màn hình chính đã tạo VietQR thì lấy luôn, chưa có thì gọi API tạo mới
-                if (picVietQR.Image != null)
-                {
-                    picBillQR.Image = (Image)picVietQR.Image.Clone();
-                }
-                else
-                {
-                    LoadQrImageSafe(picBillQR, FinalTotal, _selectedTableName);
-                }
-                // Nạp trực tiếp Bitmap hợp lệ, tuyệt đối không dùng LoadAsync hoặc lấy nhầm ErrorImage (dấu X đỏ)
+                // Tạo bản sao Bitmap độc lập cho từng PictureBox để tránh lỗi GDI+ khi đóng dialog
                 Bitmap validQrBmp = (picVietQR.Image != null && picVietQR.Image != picVietQR.ErrorImage && picVietQR.Image.Width > 100)
                     ? new Bitmap(picVietQR.Image)
                     : LoadQrImageSafe(FinalTotal, _selectedTableName);
 
-                picVietQR.Image = validQrBmp;
+                if (picVietQR.Image == null || picVietQR.Image == picVietQR.ErrorImage)
+                {
+                    picVietQR.Image = new Bitmap(validQrBmp);
+                }
                 picBillQR.Image = validQrBmp;
 
                 Button btnPrintPdf = MakeButton(
@@ -769,7 +748,6 @@ namespace QuanLyCafe_Nhom8.GUI
                         using (Image img = Image.FromStream(ms))
                         {
                             Bitmap bmp = new Bitmap(img);
-                            // Nếu ảnh offline từ SmartPaymentService bị trống vùng QR ở giữa thì vẽ bổ sung ma trận QR vào
                             if (IsCenterQrBlank(bmp))
                             {
                                 using (Graphics g = Graphics.FromImage(bmp))
@@ -785,7 +763,6 @@ namespace QuanLyCafe_Nhom8.GUI
             }
             catch
             {
-                // Chuyển sang vẽ thẻ VietQR dự phòng trực tiếp trong bộ nhớ
             }
 
             return BuildFallbackVietQrCard(roundedAmount);
@@ -895,7 +872,6 @@ namespace QuanLyCafe_Nhom8.GUI
                     }
                 }
 
-                // Vẽ biểu tượng chữ V đỏ VietQR ở tâm mã QR
                 Rectangle logoRect = new Rectangle(offsetX + 10 * cellSize, offsetY + 10 * cellSize, 5 * cellSize, 5 * cellSize);
                 g.FillRectangle(white, logoRect);
                 using (Font fLogo = new Font("Segoe UI", 14, FontStyle.Bold))
@@ -904,6 +880,12 @@ namespace QuanLyCafe_Nhom8.GUI
                     g.DrawString("V", fLogo, red, logoRect, sf);
                 }
             }
+        }
+
+
+        private void FrmMainPOS_Load(object sender, EventArgs e)
+        {
+
         }
     }
 }
