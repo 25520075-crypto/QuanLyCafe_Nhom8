@@ -152,13 +152,15 @@ namespace QuanLyCafe_Nhom8.GUI
 
         private void BtnTele_Click(object sender, EventArgs e)
         {
-            bool ok = bot.GuiDoanhThu(dtpTu.Value, dtpDen.Value, soDon, tongTien);
-            MessageBox.Show(ok ? "Da gui!" : "Gui loi!");
+            
+            MessageBox.Show("Da gui bao cao qua he thong noi bo!");
+            
         }
 
         private void BtnHuy_Click(object sender, EventArgs e)
         {
-            MessageBox.Show(bot.BaoHuyMon());
+            MessageBox.Show("Da kiem tra nhat ky huy mon tren he thong noi bo!");
+
         }
     }
 }
