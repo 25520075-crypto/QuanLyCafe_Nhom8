@@ -81,7 +81,7 @@
 <Compile Include="GUI\FrmStatistics.cs">
   <SubType>Form</SubType>
 </Compile>
-<Compile Include="Services\TelegramBotService.cs" /
+<Compile Include="Services\InternalChatService.cs" />
     <EmbeddedResource Include="GUI\FrmAuth.resx">
       <DependentUpon>FrmAuth.cs</DependentUpon>
     </EmbeddedResource>
