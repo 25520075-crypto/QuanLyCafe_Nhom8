@@ -9,7 +9,7 @@ namespace QuanLyCafe_Nhom8.GUI
 {
     public class FrmMenuManager : Form
     {
-        private readonly MenuDAL _menuDal = new MenuDAL();
+        private readonly MenuProxyService _menuProxy = new MenuProxyService();
         private int _selectedProductId = -1;
         private string _selectedImagePath = "";
 
