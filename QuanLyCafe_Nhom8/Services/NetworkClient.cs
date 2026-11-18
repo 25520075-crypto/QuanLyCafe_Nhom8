@@ -468,7 +468,6 @@ namespace QuanLyCafe_Nhom8.Services
             });
 
             // Mở dạng Non-Modal (.Show) để người dùng vừa để bảng Chat vừa bấm & kéo thả màn hình POS bên dưới
-            chatForm.Show();
             chatForm.TopMost = true;
             chatForm.Show(parentForm);
         }
