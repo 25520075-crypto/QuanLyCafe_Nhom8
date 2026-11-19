@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using QuanLyCafe_Nhom8.DAL;
-using QuanLyCafe_Nhom8.DTO;
+using Protocol;
 using QuanLyCafe_Nhom8.Services;
 
 namespace QuanLyCafe_Nhom8.GUI
@@ -999,7 +999,7 @@ namespace QuanLyCafe_Nhom8.GUI
         }
 
         // ==================== 6. XỬ LÝ NGHIỆP VỤ ĐĂNG NHẬP, OTP GMAIL & PHÂN QUYỀN POS ====================
-        private void PerformLogin()
+        private async void PerformLogin()
         {
             string u = txtLoginUser.Text.Trim();
             string p = txtLoginPass.Text.Trim();
@@ -1013,15 +1013,16 @@ namespace QuanLyCafe_Nhom8.GUI
 
             try
             {
-                UserDTO user = _userDal.CheckLogin(u, p);
+                NetworkClient.Instance.Start();
+                Protocol.UserDTO user = await NetworkClient.Instance.LoginAsync(u, p);
                 if (user != null)
                 {
-                    _renderTimer.Stop();
-                    this.Hide();
-
                     FrmMainPOS frmPos = new FrmMainPOS();
                     AttachRoleAndAdminToolsToPOS(frmPos, user);
                     frmPos.Show();
+
+                    _renderTimer.Stop();
+                    this.Hide();
                 }
                 else
                 {
@@ -1030,7 +1031,7 @@ namespace QuanLyCafe_Nhom8.GUI
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Lỗi kết nối CSDL SQL Server:\n" + ex.Message, "Lỗi SQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Lỗi khi mở màn hình POS:\n" + ex.ToString(), "Lỗi hệ thống", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
