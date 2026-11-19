@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Data;
 using System.Data.SqlClient;
-using QuanLyCafe_Nhom8.DTO;
+using Protocol;
 using QuanLyCafe_Nhom8.Services;
 
 namespace QuanLyCafe_Nhom8.DAL

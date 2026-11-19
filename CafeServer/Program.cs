@@ -144,6 +144,10 @@ namespace CafeServer
 
                 switch (req.Type)
                 {
+                    case MsgType.CHAT_MESSAGE:
+                        await BroadcastAsync(new PacketMessage { Type = MsgType.CHAT_MESSAGE, PayloadJson = req.PayloadJson });
+                        return Ok(req.Type, new { Sent = true });
+
                     case MsgType.PING:
                         return new PacketMessage { Type = MsgType.PONG };
 
@@ -324,6 +328,7 @@ namespace CafeServer
                                 return Fail(MsgType.TABLE_BUSY, "TABLE_BUSY", "Bàn đang được máy khác thao tác!");
 
                             await BroadcastAsync(new PacketMessage { Type = MsgType.TABLE_STATUS_CHANGED, PayloadJson = JsonConvert.SerializeObject(new { TableId = tableId }) });
+                            await BroadcastAsync(new PacketMessage { Type = MsgType.KDS_NEW_ORDER, PayloadJson = JsonConvert.SerializeObject(new { TableId = tableId }) });
                             return Ok(req.Type, new { Removed = true });
                         }
 
@@ -342,6 +347,8 @@ namespace CafeServer
                         {
                             int srcId = data["SourceTableId"].Value<int>();
                             int dstId = data["TargetTableId"].Value<int>();
+                            if (srcId == dstId)
+                                return Fail(req.Type, "INVALID_TABLE", "Bàn nguồn và bàn đích không được trùng nhau!");
                             if (!ExecuteWithDualTableLock(srcId, dstId, () => _posDal.MoveToEmptyTable(srcId, dstId)))
                                 return Fail(MsgType.TABLE_BUSY, "TABLE_BUSY", "Một trong hai bàn đang được máy khác thao tác!");
 
@@ -353,6 +360,8 @@ namespace CafeServer
                         {
                             int srcId = data["SourceTableId"].Value<int>();
                             int dstId = data["TargetTableId"].Value<int>();
+                            if (srcId == dstId)
+                                return Fail(req.Type, "INVALID_TABLE", "Bàn nguồn và bàn đích không được trùng nhau!");
                             if (!ExecuteWithDualTableLock(srcId, dstId, () => _posDal.MergeOccupiedTables(srcId, dstId)))
                                 return Fail(MsgType.TABLE_BUSY, "TABLE_BUSY", "Một trong hai bàn đang được máy khác thao tác!");
 
@@ -518,7 +527,14 @@ namespace CafeServer
         {
             foreach (var kv in _sessions)
             {
-                await SendToSessionAsync(kv.Value, packet);
+                try
+                {
+                    await SendToSessionAsync(kv.Value, packet);
+                }
+                catch
+                {
+                    // Bỏ qua client đã rớt mạng để không làm gián đoạn client khác
+                }
             }
         }
     }

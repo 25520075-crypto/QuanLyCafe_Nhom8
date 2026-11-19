@@ -4,7 +4,7 @@ using System.Data;
 using System.Data.SqlClient;
 using System.Security.Cryptography;
 using System.Text;
-using QuanLyCafe_Nhom8.DTO;
+using Protocol;
 
 namespace QuanLyCafe_Nhom8.DAL
 {

@@ -1,4 +1,4 @@
-﻿using QuanLyCafe_Nhom8.DTO;
+﻿using Protocol;
 using QuanLyCafe_Nhom8.Services;
 using System;
 using System.Collections.Generic;
@@ -34,16 +34,28 @@ namespace QuanLyCafe_Nhom8.GUI
             InitializeComponent();
             BuildModernPosInterface();
 
-            // Khởi động kết nối UDP Discovery + TCP Session Client
             _netClient.Start();
             _netClient.OnServerEventReceived += OnTcpServerEventReceived;
 
-            LoadAllProducts();
-            SwitchChannelTab(Channel.DineIn, reloadFromDb: true);
+            this.Shown += async (s, e) =>
+            {
+                await System.Threading.Tasks.Task.Run(() =>
+                {
+                    var products = _netClient.GetActiveProducts();
+                    var tables = _netClient.GetAllTables();
+                    this.BeginInvoke(new Action(() =>
+                    {
+                        _allProducts = products;
+                        BindProductList(_allProducts);
+                        _cachedTables = tables;
+                        SwitchChannelTab(Channel.DineIn, reloadFromDb: false);
+                    }));
+                });
+            };
         }
 
         // Lắng nghe sự kiện Realtime từ TCP Server đẩy về (< 1 giây)
-        private void OnTcpServerEventReceived(string msgType, string payload)
+        private void OnTcpServerEventReceived(MsgType msgType, string payload)
         {
             if (this.IsDisposed || !this.IsHandleCreated) return;
 

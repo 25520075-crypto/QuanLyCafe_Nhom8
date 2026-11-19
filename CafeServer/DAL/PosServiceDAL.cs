@@ -148,7 +148,7 @@ namespace CafeServer.DAL
                 list.Add(new ProductDTO
                 {
                     ProductId = Convert.ToInt32(row["ProductId"]),
-                    CategoryId = Convert.ToInt32(row["CategoryId"]),
+                    CategoryId = row["CategoryId"] == DBNull.Value ? 0 : Convert.ToInt32(row["CategoryId"]),
                     ProductName = row["ProductName"].ToString(),
                     Price = Convert.ToDecimal(row["Price"]),
                     ImagePath = row["ImagePath"] == DBNull.Value ? "" : row["ImagePath"].ToString()

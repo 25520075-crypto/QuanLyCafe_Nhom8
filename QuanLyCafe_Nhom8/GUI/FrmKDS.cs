@@ -3,7 +3,7 @@ using System.Data;
 using System.Drawing;
 using System.Windows.Forms;
 using QuanLyCafe_Nhom8.Services;
-
+using Protocol;
 namespace QuanLyCafe_Nhom8.GUI
 {
     public partial class FrmKDS : Form
@@ -26,7 +26,6 @@ namespace QuanLyCafe_Nhom8.GUI
             _netClient.OnConnectionStateChanged += OnTcpConnectionChanged;
 
             // Tự động đồng bộ danh sách món đang chờ ngay khi mở màn hình KDS
-            _ = _netClient.SendFrameAsync(MsgType.GET_PENDING_KDS, "SYNC");
             LoadPendingOrders();
         }
 
@@ -118,7 +117,6 @@ namespace QuanLyCafe_Nhom8.GUI
             btnRefresh.FlatAppearance.BorderSize = 0;
             btnRefresh.Click += async (s, e) =>
             {
-                await _netClient.SendFrameAsync(MsgType.GET_PENDING_KDS, "SYNC");
                 LoadPendingOrders();
             };
 
@@ -129,7 +127,7 @@ namespace QuanLyCafe_Nhom8.GUI
         }
 
         // Nhận gói tin KDS_NEW_ORDER từ Server đẩy sang ngay khi Thu ngân bấm 'Gửi pha chế'
-        private void OnTcpEventReceived(string msgType, string payload)
+        private void OnTcpEventReceived(MsgType msgType, string payload)
         {
             if (this.IsDisposed || !this.IsHandleCreated) return;
 
@@ -157,7 +155,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 lblTcpStatus.ForeColor = connected ? Color.FromArgb(129, 199, 132) : Color.FromArgb(255, 183, 77);
                 if (connected)
                 {
-                    await _netClient.SendFrameAsync(MsgType.GET_PENDING_KDS, "RECONNECT_SYNC");
                     LoadPendingOrders();
                 }
             }));
