@@ -83,7 +83,8 @@
     <Compile Include="Services\AuthService.cs" />
     <Compile Include="Services\NetworkClient.cs" />
     <Compile Include="Services\SmartPaymentService.cs" />
-    <Compile Include="Services\TelegramBotService.cs" />
+    <Compile Include="Services\UserProxyService.cs"/>
+    <Compile Include="Services\MenuProxyService.cs"/>
     <EmbeddedResource Include="GUI\FrmAuth.resx">
       <DependentUpon>FrmAuth.cs</DependentUpon>
     </EmbeddedResource>
