@@ -4,9 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Drawing.Printing;
-using System.IO;
 using System.Text;
 using System.Windows.Forms;
 
@@ -14,28 +12,34 @@ namespace QuanLyCafe_Nhom8.GUI
 {
     public partial class FrmMainPOS
     {
-        // Gom toàn bộ Màu sắc & Font chữ về một chỗ để tái sử dụng, chống rò rỉ GDI
+        // Bảng màu tối giản theo phong cách phần mềm POS thực tế (tông Nâu Espresso + Trung tính)
         private static class Theme
         {
-            public static readonly Color BgMain = Color.FromArgb(244, 239, 234);
-            public static readonly Color BgBoard = Color.FromArgb(250, 248, 245);
-            public static readonly Color BgGrid = Color.FromArgb(252, 250, 248);
-            public static readonly Color Brown = Color.FromArgb(62, 39, 35);
-            public static readonly Color BrownLight = Color.FromArgb(109, 76, 65);
-            public static readonly Color CreamText = Color.FromArgb(255, 224, 178);
-            public static readonly Color TabIdle = Color.FromArgb(224, 214, 205);
-            public static readonly Color Green = Color.FromArgb(39, 174, 96);
-            public static readonly Color GreenBright = Color.FromArgb(46, 204, 113);
-            public static readonly Color GreenDark = Color.FromArgb(20, 90, 50);
-            public static readonly Color Orange = Color.FromArgb(211, 84, 0);
-            public static readonly Color Blue = Color.FromArgb(41, 128, 185);
-            public static readonly Color Purple = Color.FromArgb(142, 68, 173);
-            public static readonly Color Red = Color.FromArgb(192, 57, 43);
+            public static readonly Color BgMain = Color.FromArgb(243, 241, 238);       // Nền xám kem dịu mắt
+            public static readonly Color BgBoard = Color.FromArgb(249, 248, 246);      // Nền khu vực sơ đồ bàn
+            public static readonly Color BgGrid = Color.White;
+            public static readonly Color BorderSubtle = Color.FromArgb(224, 220, 215); // Viền mảnh tinh tế
 
-            public static readonly Font Brand = new Font("Segoe UI", 14f, FontStyle.Bold);
+            public static readonly Color Brown = Color.FromArgb(92, 61, 46);           // Nâu cà phê ấm (sáng hơn hẳn)
+            public static readonly Color HeaderBtn = Color.FromArgb(118, 82, 64);      // Nút Header nâu sáng đồng bộ
+            public static readonly Color BrownLight = Color.FromArgb(138, 98, 78);     // Nút phụ nâu nhạt
+            public static readonly Color CreamText = Color.FromArgb(255, 244, 230);    // Chữ kem sáng dễ đọc
+            public static readonly Color SlateBtn = Color.FromArgb(71, 85, 105);       // Nút thao tác phụ
+            public static readonly Color TabIdle = Color.FromArgb(232, 227, 222);
+
+            // Màu trạng thái trầm, không chói
+            public static readonly Color Green = Color.FromArgb(27, 127, 70);          // Bàn trống / Thêm món
+            public static readonly Color GreenBright = Color.FromArgb(34, 153, 84);
+            public static readonly Color GreenDark = Color.FromArgb(20, 90, 50);
+            public static readonly Color Orange = Color.FromArgb(194, 87, 26);         // Bàn có khách / Thanh toán
+            public static readonly Color Blue = Color.FromArgb(37, 99, 150);           // Gửi pha chế / VietQR
+            public static readonly Color Purple = Color.FromArgb(92, 68, 60);          // Gộp bàn (đồng bộ tông nâu)
+            public static readonly Color Red = Color.FromArgb(176, 48, 42);            // Hủy món / Cảnh báo
+
+            public static readonly Font Brand = new Font("Segoe UI", 12.5f, FontStyle.Bold);
             public static readonly Font Total = new Font("Segoe UI", 13f, FontStyle.Bold);
-            public static readonly Font Header = new Font("Segoe UI", 12f, FontStyle.Bold);
-            public static readonly Font SubHeader = new Font("Segoe UI", 11f, FontStyle.Bold);
+            public static readonly Font Header = new Font("Segoe UI", 11.5f, FontStyle.Bold);
+            public static readonly Font SubHeader = new Font("Segoe UI", 10.5f, FontStyle.Bold);
             public static readonly Font Bold10 = new Font("Segoe UI", 10f, FontStyle.Bold);
             public static readonly Font Bold95 = new Font("Segoe UI", 9.5f, FontStyle.Bold);
             public static readonly Font Bold9 = new Font("Segoe UI", 9f, FontStyle.Bold);
@@ -60,6 +64,19 @@ namespace QuanLyCafe_Nhom8.GUI
 
         // ==================== CÁC HÀM TIỆN ÍCH GIAO DIỆN ====================
 
+        private static Panel MakeCardPanel(Point loc, Size size)
+        {
+            Panel pnl = new Panel { Location = loc, Size = size, BackColor = Color.White };
+            pnl.Paint += (s, e) =>
+            {
+                using (Pen p = new Pen(Theme.BorderSubtle, 1))
+                {
+                    e.Graphics.DrawRectangle(p, 0, 0, pnl.Width - 1, pnl.Height - 1);
+                }
+            };
+            return pnl;
+        }
+
         private static Button MakeButton(string text, Point loc, Size size, Color back, EventHandler onClick = null, Font font = null)
         {
             var btn = new Button
@@ -75,6 +92,7 @@ namespace QuanLyCafe_Nhom8.GUI
                 Font = font ?? Theme.Bold95
             };
             btn.FlatAppearance.BorderSize = 0;
+            btn.FlatAppearance.MouseOverBackColor = ControlPaint.Light(back, 0.12f);
             if (onClick != null) btn.Click += onClick;
             return btn;
         }
@@ -109,7 +127,15 @@ namespace QuanLyCafe_Nhom8.GUI
         }
 
         /// <summary>
-        /// Hàm nạp ảnh VietQR từ API v2 (Base64 -> Image) vào PictureBox an toàn, không dùng LoadAsync để tránh lỗi dấu X đỏ
+        /// Hàm trả về trực tiếp Bitmap mã VietQR v2 từ SmartPaymentService
+        /// </summary>
+        private Bitmap LoadQrImageSafe(decimal amount, string tableName)
+        {
+            return SmartPaymentService.GetQrBitmap(amount, tableName);
+        }
+
+        /// <summary>
+        /// Hàm nạp ảnh VietQR v2 trực tiếp vào PictureBox chỉ định
         /// </summary>
         private void LoadQrImageSafe(PictureBox targetBox, decimal amount, string tableName)
         {
@@ -145,37 +171,38 @@ namespace QuanLyCafe_Nhom8.GUI
 
         private void BuildModernPosInterface()
         {
-            this.Text = "Hệ thống Quản lý Quán Cafe Thông Minh - Nhóm 8";
+            this.Text = "Hệ thống Quản lý Quán Cafe - COFFEE FEFA (Nhóm 8)";
             this.Size = new Size(1350, 805);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.BackColor = Theme.BgMain;
             this.DoubleBuffered = true;
 
-            // 1. THANH HEADER TRÊN CÙNG
-            Panel pnlTopHeader = new Panel { Dock = DockStyle.Top, Height = 60, BackColor = Theme.Brown };
+            // 1. THANH HEADER TRÊN CÙNG (Đồng bộ 1 tông nền gọn gàng)
+            Panel pnlTopHeader = new Panel { Dock = DockStyle.Top, Height = 58, BackColor = Theme.Brown };
 
             Label lblBrand = new Label
             {
-                Text = "☕ COFFEE FEFA - NHÓM 8",
-                Font = new Font("Segoe UI", 12f, FontStyle.Bold),
+                Text = "COFFEE FEFA - NHÓM 8",
+                Font = Theme.Brand,
                 ForeColor = Theme.CreamText,
-                Location = new Point(12, 18),
-                AutoSize = true
+                Location = new Point(16, 17),
+                AutoSize = true,
+                UseMnemonic = false
             };
 
-            Button btnOpenChat = MakeButton("💬 Chat ", new Point(242, 11), new Size(106, 38), Theme.Blue, (s, e) =>
+            Button btnOpenChat = MakeButton("Chat nội bộ", new Point(238, 11), new Size(108, 36), Theme.HeaderBtn, (s, e) =>
             {
                 NetworkClient.Instance.ShowInAppChatAndStatsDialog(this, this.Text.Contains("Admin") ? "Quản lý" : "Thu ngân");
             });
 
-            Button btnOpenKDS = MakeButton("🔔 Màn hình Pha chế", new Point(630, 11), new Size(205, 38), Theme.Orange, (s, e) =>
+            Button btnOpenKDS = MakeButton("Màn hình Pha chế", new Point(630, 11), new Size(205, 36), Theme.HeaderBtn, (s, e) =>
             {
                 FrmKDS kdsForm = new FrmKDS();
                 kdsForm.TopMost = true;
                 kdsForm.Show();
             });
 
-            Button btnOpenMenu = MakeButton("📋 Quản lý Thực đơn", new Point(855, 11), new Size(205, 38), Theme.Green, (s, e) =>
+            Button btnOpenMenu = MakeButton("Quản lý Thực đơn", new Point(855, 11), new Size(205, 36), Theme.HeaderBtn, (s, e) =>
             {
                 using (FrmMenuManager menuForm = new FrmMenuManager())
                 {
@@ -184,7 +211,7 @@ namespace QuanLyCafe_Nhom8.GUI
                 LoadAllProducts();
             });
 
-            Button btnOpenStats = MakeButton("📊 Thống kê Doanh thu", new Point(1070, 11), new Size(205, 38), Theme.BrownLight, (s, e) =>
+            Button btnOpenStats = MakeButton("Thống kê Doanh thu", new Point(1070, 11), new Size(205, 36), Theme.HeaderBtn, (s, e) =>
             {
                 using (FrmStatistics frm = new FrmStatistics())
                 {
@@ -195,30 +222,31 @@ namespace QuanLyCafe_Nhom8.GUI
             pnlTopHeader.Controls.AddRange(new Control[] { lblBrand, btnOpenChat, btnOpenKDS, btnOpenMenu, btnOpenStats });
 
             // 2. CỘT TRÁI: KÊNH BÁN HÀNG & SƠ ĐỒ BÀN
-            Panel pnlLeft = new Panel { Location = new Point(15, 72), Size = new Size(455, 680), BackColor = Color.White };
+            Panel pnlLeft = MakeCardPanel(new Point(15, 72), new Size(455, 680));
 
             Label lblAreaTitle = new Label
             {
                 Text = "KÊNH BÁN HÀNG & SƠ ĐỒ ĐƠN",
                 Font = Theme.SubHeader,
                 ForeColor = Theme.Brown,
-                Location = new Point(12, 10),
-                AutoSize = true
+                Location = new Point(12, 12),
+                AutoSize = true,
+                UseMnemonic = false
             };
 
             Label lblLegend = new Label
             {
-                Text = "● Xanh: Trống  ● Cam: Có đơn",
+                Text = "Xanh: Trống  |  Cam: Có đơn",
                 Font = Theme.Italic85,
                 ForeColor = Color.DimGray,
-                Location = new Point(275, 13),
+                Location = new Point(282, 14),
                 AutoSize = true
             };
 
-            Button btnTabDineIn = MakeTabButton("Tại quán", new Point(12, 38), 98, () => SwitchChannelTab(Channel.DineIn));
-            Button btnTabTakeAway = MakeTabButton("Mang về", new Point(114, 38), 98, () => SwitchChannelTab(Channel.TakeAway));
-            Button btnTabShopeeXanh = MakeTabButton("Shopee & XanhSM", new Point(216, 38), 130, () => SwitchChannelTab(Channel.ShopeeXanh));
-            Button btnTabGrab = MakeTabButton("GrabFood", new Point(350, 38), 93, () => SwitchChannelTab(Channel.Grab));
+            Button btnTabDineIn = MakeTabButton("Tại quán", new Point(12, 40), 98, () => SwitchChannelTab(Channel.DineIn));
+            Button btnTabTakeAway = MakeTabButton("Mang về", new Point(114, 40), 98, () => SwitchChannelTab(Channel.TakeAway));
+            Button btnTabShopeeXanh = MakeTabButton("Shopee & XanhSM", new Point(216, 40), 130, () => SwitchChannelTab(Channel.ShopeeXanh));
+            Button btnTabGrab = MakeTabButton("GrabFood", new Point(350, 40), 93, () => SwitchChannelTab(Channel.Grab));
 
             _mainTabButtons = new Dictionary<Channel, Button>
             {
@@ -230,14 +258,14 @@ namespace QuanLyCafe_Nhom8.GUI
 
             flpTables = new FlowLayoutPanel
             {
-                Location = new Point(12, 78),
-                Size = new Size(431, 515),
+                Location = new Point(12, 82),
+                Size = new Size(431, 514),
                 AutoScroll = true,
                 BackColor = Theme.BgBoard
             };
 
-            Button btnMoveTable = MakeButton("⇄ Chuyển bàn", new Point(12, 608), new Size(210, 52), Theme.Blue, btnMoveTable_Click, Theme.Bold9);
-            Button btnMergeTable = MakeButton("⊕ Gộp bàn", new Point(233, 608), new Size(210, 52), Theme.Purple, btnMergeTable_Click, Theme.Bold9);
+            Button btnMoveTable = MakeButton("Chuyển bàn", new Point(12, 610), new Size(210, 48), Theme.SlateBtn, btnMoveTable_Click, Theme.Bold95);
+            Button btnMergeTable = MakeButton("Gộp bàn", new Point(233, 610), new Size(210, 48), Theme.BrownLight, btnMergeTable_Click, Theme.Bold95);
 
             pnlLeft.Controls.AddRange(new Control[]
             {
@@ -247,32 +275,33 @@ namespace QuanLyCafe_Nhom8.GUI
             });
 
             // 3. CỘT GIỮA: GỌI MÓN, DANH SÁCH MÓN & DUYỆT GIẢM GIÁ
-            Panel pnlCenter = new Panel { Location = new Point(482, 72), Size = new Size(515, 680), BackColor = Color.White };
+            Panel pnlCenter = MakeCardPanel(new Point(482, 72), new Size(515, 680));
 
             lblSelectedTable = new Label
             {
                 Text = "CHƯA CHỌN BÀN / ĐƠN",
                 Font = Theme.Header,
-                ForeColor = Theme.Red,
-                Location = new Point(15, 10),
-                AutoSize = true
+                ForeColor = Theme.Orange,
+                Location = new Point(15, 12),
+                AutoSize = true,
+                UseMnemonic = false
             };
 
             Label lblSearch = new Label
             {
-                Text = "🔍 Tìm món:",
+                Text = "Tìm món:",
                 Font = Theme.Bold95,
                 ForeColor = Theme.Brown,
-                Location = new Point(15, 44),
+                Location = new Point(15, 45),
                 AutoSize = true
             };
 
-            txtSearchProduct = new TextBox { Location = new Point(105, 41), Size = new Size(395, 27), Font = Theme.Regular10 };
+            txtSearchProduct = new TextBox { Location = new Point(88, 42), Size = new Size(412, 27), Font = Theme.Regular10 };
             txtSearchProduct.TextChanged += txtSearchProduct_TextChanged;
 
             cboProducts = new ComboBox
             {
-                Location = new Point(15, 76),
+                Location = new Point(15, 77),
                 Size = new Size(290, 32),
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Font = Theme.Regular10
@@ -280,7 +309,7 @@ namespace QuanLyCafe_Nhom8.GUI
 
             nudQuantity = new NumericUpDown
             {
-                Location = new Point(315, 76),
+                Location = new Point(315, 77),
                 Size = new Size(65, 32),
                 Minimum = 1,
                 Maximum = 50,
@@ -288,7 +317,7 @@ namespace QuanLyCafe_Nhom8.GUI
                 Font = Theme.Regular10
             };
 
-            Button btnAddItem = MakeButton("+ Thêm nháp", new Point(390, 74), new Size(110, 33), Theme.Green, btnAddItem_Click);
+            Button btnAddItem = MakeButton("+ Thêm món", new Point(390, 75), new Size(110, 32), Theme.Green, btnAddItem_Click);
 
             dgvBillDetails = new DataGridView
             {
@@ -296,16 +325,27 @@ namespace QuanLyCafe_Nhom8.GUI
                 Size = new Size(485, 385),
                 ReadOnly = true,
                 AllowUserToAddRows = false,
+                RowHeadersVisible = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 BackgroundColor = Theme.BgGrid,
                 BorderStyle = BorderStyle.FixedSingle,
+                CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal,
+                GridColor = Theme.BorderSubtle,
+                EnableHeadersVisualStyles = false,
                 RowTemplate = { Height = 34 },
                 SelectionMode = DataGridViewSelectionMode.FullRowSelect,
                 Font = Theme.Regular95
             };
+            dgvBillDetails.ColumnHeadersHeight = 36;
+            dgvBillDetails.ColumnHeadersDefaultCellStyle.BackColor = Theme.BgMain;
+            dgvBillDetails.ColumnHeadersDefaultCellStyle.ForeColor = Theme.Brown;
+            dgvBillDetails.ColumnHeadersDefaultCellStyle.Font = Theme.Bold9;
+            dgvBillDetails.AlternatingRowsDefaultCellStyle.BackColor = Theme.BgBoard;
+            dgvBillDetails.DefaultCellStyle.SelectionBackColor = Color.FromArgb(245, 224, 206);
+            dgvBillDetails.DefaultCellStyle.SelectionForeColor = Theme.Brown;
 
-            Button btnSendKitchen = MakeButton("📨 GỬI PHA CHẾ", new Point(15, 512), new Size(485, 38), Theme.Blue, btnSendKitchen_Click);
-            Button btnRemoveItem = MakeButton("🗑 Hủy món", new Point(15, 558), new Size(205, 36), Theme.Red, btnRemoveItem_Click, Theme.Bold9);
+            Button btnSendKitchen = MakeButton("GỬI PHA CHẾ", new Point(15, 512), new Size(485, 38), Theme.Blue, btnSendKitchen_Click);
+            Button btnRemoveItem = MakeButton("Hủy món", new Point(15, 558), new Size(205, 36), Theme.Red, btnRemoveItem_Click, Theme.Bold9);
 
             Label lblDiscountTitle = new Label
             {
@@ -326,9 +366,9 @@ namespace QuanLyCafe_Nhom8.GUI
                 Font = Theme.Regular10
             };
 
-            Button btnApplyDiscount = MakeButton("Duyệt Giảm giá", new Point(372, 558), new Size(128, 36), Theme.BrownLight, btnApplyDiscount_Click, Theme.Bold9);
+            Button btnApplyDiscount = MakeButton("Áp dụng", new Point(372, 558), new Size(128, 36), Theme.BrownLight, btnApplyDiscount_Click, Theme.Bold9);
 
-            Panel pnlTotalBox = new Panel { Location = new Point(15, 604), Size = new Size(485, 60), BackColor = Theme.Brown };
+            Panel pnlTotalBox = new Panel { Location = new Point(15, 604), Size = new Size(485, 58), BackColor = Theme.Brown };
             lblTotalAmount = new Label
             {
                 Text = "TỔNG THANH TOÁN: 0 VNĐ",
@@ -347,40 +387,34 @@ namespace QuanLyCafe_Nhom8.GUI
             });
 
             // 4. CỘT PHẢI: VIETQR, IN HÓA ĐƠN & THANH TOÁN
-            Panel pnlRight = new Panel { Location = new Point(1008, 72), Size = new Size(312, 680), BackColor = Color.White };
+            Panel pnlRight = MakeCardPanel(new Point(1008, 72), new Size(312, 680));
 
             Label lblPayTitle = new Label
             {
                 Text = "THANH TOÁN & IN HÓA ĐƠN",
                 Font = Theme.SubHeader,
                 ForeColor = Theme.Brown,
-                Location = new Point(18, 10),
-                AutoSize = true
+                Location = new Point(18, 12),
+                AutoSize = true,
+                UseMnemonic = false
             };
 
-            Button btnGenerateQR = MakeButton("1. Tạo mã VietQR theo số tiền", new Point(18, 38), new Size(276, 38), Theme.Blue, btnGenerateQR_Click);
+            Button btnGenerateQR = MakeButton("Tạo mã VietQR", new Point(18, 40), new Size(276, 38), Theme.Blue, btnGenerateQR_Click);
 
             picVietQR = new PictureBox
             {
-                Location = new Point(18, 84),
-                Size = new Size(276, 340),
+                Location = new Point(18, 86),
+                Size = new Size(276, 338),
                 BackColor = Theme.BgBoard,
                 BorderStyle = BorderStyle.FixedSingle,
                 SizeMode = PictureBoxSizeMode.Zoom
             };
-            picVietQR.LoadCompleted += (s, e) =>
-            {
-                if (e.Error != null || picVietQR.Image == null || picVietQR.Image == picVietQR.ErrorImage)
-                {
-                    picVietQR.Image = LoadQrImageSafe(FinalTotal, _selectedTableName);
-                }
-            };
 
-            Button btnPrintBill = MakeButton("🖨 Xem & In Bill Tính Tiền", new Point(18, 434), new Size(276, 40), Theme.Green, btnPrintBill_Click);
+            Button btnPrintBill = MakeButton("Xem & In hóa đơn", new Point(18, 434), new Size(276, 40), Theme.SlateBtn, btnPrintBill_Click);
 
             Label lblMethod = new Label
             {
-                Text = "Phân loại nguồn tiền thu vào:",
+                Text = "Phương thức thanh toán:",
                 Font = Theme.Bold95,
                 ForeColor = Theme.Brown,
                 Location = new Point(18, 486),
@@ -403,7 +437,7 @@ namespace QuanLyCafe_Nhom8.GUI
             });
             cboPaymentMethod.SelectedIndex = 0;
 
-            Button btnConfirmPayment = MakeButton("2. XÁC NHẬN ĐÃ NHẬN TIỀN", new Point(18, 552), new Size(276, 60), Theme.Orange, btnConfirmPayment_Click, Theme.Bold10);
+            Button btnConfirmPayment = MakeButton("XÁC NHẬN THANH TOÁN", new Point(18, 552), new Size(276, 58), Theme.Orange, btnConfirmPayment_Click, Theme.Bold10);
 
             pnlRight.Controls.AddRange(new Control[]
             {
@@ -511,14 +545,14 @@ namespace QuanLyCafe_Nhom8.GUI
 
                 Label lblPickedStatus = new Label
                 {
-                    Text = "Chưa tích chọn bàn đích nào",
+                    Text = "Chưa chọn bàn đích nào",
                     Font = Theme.SubHeader,
                     ForeColor = Theme.Red,
                     Location = new Point(15, 465),
                     AutoSize = true
                 };
 
-                Button btnConfirmPick = MakeButton("✔ XÁC NHẬN THỰC HIỆN", new Point(380, 458), new Size(270, 44), Theme.Green, (s, e) =>
+                Button btnConfirmPick = MakeButton("XÁC NHẬN THỰC HIỆN", new Point(380, 458), new Size(270, 44), Theme.Green, (s, e) =>
                 {
                     pickerForm.DialogResult = DialogResult.OK;
                     pickerForm.Close();
@@ -534,10 +568,10 @@ namespace QuanLyCafe_Nhom8.GUI
                     renderModalCards();
                 }
 
-                modalTabs[Channel.DineIn] = MakeTabButton("1. Tại quán", new Point(15, 42), 140, () => SwitchModalTab(Channel.DineIn));
-                modalTabs[Channel.TakeAway] = MakeTabButton("2. Mua mang về", new Point(162, 42), 145, () => SwitchModalTab(Channel.TakeAway));
-                modalTabs[Channel.ShopeeXanh] = MakeTabButton("3. Shopee & XanhSM", new Point(314, 42), 175, () => SwitchModalTab(Channel.ShopeeXanh));
-                modalTabs[Channel.Grab] = MakeTabButton("4. GrabFood", new Point(496, 42), 154, () => SwitchModalTab(Channel.Grab));
+                modalTabs[Channel.DineIn] = MakeTabButton("Tại quán", new Point(15, 42), 140, () => SwitchModalTab(Channel.DineIn));
+                modalTabs[Channel.TakeAway] = MakeTabButton("Mang về", new Point(162, 42), 145, () => SwitchModalTab(Channel.TakeAway));
+                modalTabs[Channel.ShopeeXanh] = MakeTabButton("Shopee & XanhSM", new Point(314, 42), 175, () => SwitchModalTab(Channel.ShopeeXanh));
+                modalTabs[Channel.Grab] = MakeTabButton("GrabFood", new Point(496, 42), 154, () => SwitchModalTab(Channel.Grab));
 
                 renderModalCards = () =>
                 {
@@ -555,7 +589,7 @@ namespace QuanLyCafe_Nhom8.GUI
                         bool isTicked = chosenTable != null && chosenTable.TableId == t.TableId;
 
                         string cardText = isTicked
-                            ? $"✅ [ĐÃ CHỌN]\n{t.TableName}\n({t.Status})"
+                            ? $"[ĐÃ CHỌN]\n{t.TableName}\n({t.Status})"
                             : $"{t.TableName}\n({t.Status})";
 
                         Button card = MakeButton(cardText, Point.Empty, new Size(142, 98), Color.White);
@@ -567,19 +601,19 @@ namespace QuanLyCafe_Nhom8.GUI
                         {
                             card.BackColor = Theme.GreenBright;
                             card.ForeColor = Color.White;
-                            card.FlatAppearance.BorderSize = 4;
+                            card.FlatAppearance.BorderSize = 3;
                             card.FlatAppearance.BorderColor = Theme.GreenDark;
                         }
                         else if (isSelectable)
                         {
-                            card.BackColor = isEmpty ? Color.FromArgb(232, 248, 245) : Color.FromArgb(253, 237, 236);
-                            card.ForeColor = Color.FromArgb(44, 62, 80);
+                            card.BackColor = isEmpty ? Color.FromArgb(236, 248, 241) : Color.FromArgb(253, 240, 234);
+                            card.ForeColor = Theme.Brown;
                             card.FlatAppearance.BorderSize = 2;
                             card.FlatAppearance.BorderColor = isEmpty ? Theme.Green : Theme.Orange;
                         }
                         else
                         {
-                            card.BackColor = Color.FromArgb(235, 235, 235);
+                            card.BackColor = Color.FromArgb(238, 238, 238);
                             card.ForeColor = Color.DarkGray;
                             card.FlatAppearance.BorderSize = 1;
                             card.FlatAppearance.BorderColor = Color.Silver;
@@ -588,7 +622,7 @@ namespace QuanLyCafe_Nhom8.GUI
                         card.Click += (s, e) =>
                         {
                             chosenTable = t;
-                            lblPickedStatus.Text = $"✔ Đã tích chọn: {t.TableName} ({t.Status})";
+                            lblPickedStatus.Text = $"Đã chọn: {t.TableName} ({t.Status})";
                             lblPickedStatus.ForeColor = Theme.Green;
                             btnConfirmPick.Enabled = true;
                             renderModalCards();
@@ -618,8 +652,8 @@ namespace QuanLyCafe_Nhom8.GUI
         private string BuildReceiptText(DataTable dtItems, string method)
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("        CAFE FEFA - NHÓM 8");
-            sb.AppendLine("      ĐC: Công Viên Thủy Tinh ");
+            sb.AppendLine("        COFFEE FEFA - NHÓM 8");
+            sb.AppendLine("      ĐC: Công Viên Thủy Tinh");
             sb.AppendLine("==========================================");
             sb.AppendLine("          PHIẾU TẠM TÍNH / HÓA ĐƠN");
             sb.AppendLine($"Bàn / Đơn : {_selectedTableName}");
@@ -681,7 +715,6 @@ namespace QuanLyCafe_Nhom8.GUI
                     BorderStyle = BorderStyle.FixedSingle
                 };
 
-                // Tạo bản sao Bitmap độc lập cho từng PictureBox để tránh lỗi GDI+ khi đóng dialog
                 Bitmap validQrBmp = (picVietQR.Image != null && picVietQR.Image != picVietQR.ErrorImage && picVietQR.Image.Width > 100)
                     ? new Bitmap(picVietQR.Image)
                     : LoadQrImageSafe(FinalTotal, _selectedTableName);
@@ -693,7 +726,7 @@ namespace QuanLyCafe_Nhom8.GUI
                 picBillQR.Image = validQrBmp;
 
                 Button btnPrintPdf = MakeButton(
-                    "🖨 Xuất Máy In / Lưu File PDF",
+                    "Xuất Máy In / Lưu File PDF",
                     new Point(65, lblReceiptText.PreferredHeight + 310),
                     new Size(280, 42),
                     Theme.Blue,
@@ -730,163 +763,8 @@ namespace QuanLyCafe_Nhom8.GUI
             }
         }
 
-        // ==================== HÀM ĐẢM BẢO ẢNH VIETQR LUÔN HIỂN THỊ 100% ====================
-
-        private Bitmap LoadQrImageSafe(decimal amount, string tableName)
-        {
-            long roundedAmount = Convert.ToInt64(Math.Round(amount));
-
-            try
-            {
-                string qrPathOrUrl = SmartPaymentService.BuildVietQrUrl(amount, tableName);
-                if (!string.IsNullOrWhiteSpace(qrPathOrUrl) && File.Exists(qrPathOrUrl))
-                {
-                    byte[] bytes = File.ReadAllBytes(qrPathOrUrl);
-                    if (bytes != null && bytes.Length > 500)
-                    {
-                        using (MemoryStream ms = new MemoryStream(bytes))
-                        using (Image img = Image.FromStream(ms))
-                        {
-                            Bitmap bmp = new Bitmap(img);
-                            if (IsCenterQrBlank(bmp))
-                            {
-                                using (Graphics g = Graphics.FromImage(bmp))
-                                {
-                                    g.SmoothingMode = SmoothingMode.AntiAlias;
-                                    DrawOfflineQrMatrix(g, new Rectangle(65, 78, 230, 230));
-                                }
-                            }
-                            return bmp;
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-
-            return BuildFallbackVietQrCard(roundedAmount);
-        }
-
-        private static bool IsCenterQrBlank(Bitmap bmp)
-        {
-            if (bmp.Width < 260 || bmp.Height < 260) return false;
-            int midY = bmp.Height / 2 - 30;
-            for (int x = 80; x < bmp.Width - 80; x += 6)
-            {
-                Color c = bmp.GetPixel(x, midY);
-                if (c.R < 240 || c.G < 240 || c.B < 240)
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        private static Bitmap BuildFallbackVietQrCard(long amount)
-        {
-            Bitmap bmp = new Bitmap(360, 460);
-            using (Graphics g = Graphics.FromImage(bmp))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear(Color.FromArgb(242, 249, 235));
-
-                using (SolidBrush cardBrush = new SolidBrush(Color.White))
-                {
-                    g.FillRectangle(cardBrush, 20, 20, 320, 420);
-                }
-
-                StringFormat sf = new StringFormat { Alignment = StringAlignment.Center };
-                using (Font fBank = new Font("Segoe UI", 15, FontStyle.Bold))
-                using (SolidBrush brGreen = new SolidBrush(Color.FromArgb(0, 107, 63)))
-                {
-                    g.DrawString(SmartPaymentService.BankShortName, fBank, brGreen, new RectangleF(0, 28, 360, 32), sf);
-                }
-
-                DrawOfflineQrMatrix(g, new Rectangle(65, 75, 230, 230));
-
-                using (Font fSub = new Font("Segoe UI", 9.5f, FontStyle.Bold))
-                using (SolidBrush brRed = new SolidBrush(Color.FromArgb(192, 57, 43)))
-                {
-                    g.DrawString("VIETQR - NAPAS 247", fSub, brRed, new RectangleF(0, 325, 360, 22), sf);
-                }
-
-                using (Font fName = new Font("Segoe UI", 11, FontStyle.Bold))
-                using (Font fAcc = new Font("Segoe UI", 11, FontStyle.Regular))
-                using (SolidBrush brDark = new SolidBrush(Color.FromArgb(30, 30, 30)))
-                {
-                    g.DrawString(SmartPaymentService.AccountName, fName, brDark, new RectangleF(0, 355, 360, 24), sf);
-                    g.DrawString($"STK: {SmartPaymentService.AccountNo}", fAcc, brDark, new RectangleF(0, 380, 360, 24), sf);
-                    if (amount > 0)
-                    {
-                        g.DrawString($"Số tiền: {amount:N0} VNĐ", fName, brDark, new RectangleF(0, 406, 360, 24), sf);
-                    }
-                }
-            }
-            return bmp;
-        }
-
-        private static void DrawOfflineQrMatrix(Graphics g, Rectangle bounds)
-        {
-            int gridSize = 25;
-            int cellSize = bounds.Width / gridSize;
-            int actualWidth = gridSize * cellSize;
-            int offsetX = bounds.X + (bounds.Width - actualWidth) / 2;
-            int offsetY = bounds.Y + (bounds.Height - actualWidth) / 2;
-
-            Random rnd = new Random(994288652);
-
-            using (SolidBrush black = new SolidBrush(Color.Black))
-            using (SolidBrush white = new SolidBrush(Color.White))
-            using (SolidBrush red = new SolidBrush(Color.FromArgb(220, 38, 38)))
-            using (Pen borderPen = new Pen(Color.FromArgb(25, 65, 130), 2))
-            {
-                g.FillRectangle(white, bounds.X - 6, bounds.Y - 6, bounds.Width + 12, bounds.Height + 12);
-                g.DrawRectangle(borderPen, bounds.X - 6, bounds.Y - 6, bounds.Width + 12, bounds.Height + 12);
-
-                for (int r = 0; r < gridSize; r++)
-                {
-                    for (int c = 0; c < gridSize; c++)
-                    {
-                        bool isFinder = (r < 7 && c < 7) || (r < 7 && c >= gridSize - 7) || (r >= gridSize - 7 && c < 7);
-                        bool isQuietZone = (r == 7 && c <= 7) || (c == 7 && r <= 7) ||
-                                           (r == 7 && c >= gridSize - 8) || (c == gridSize - 8 && r <= 7) ||
-                                           (r == gridSize - 8 && c <= 7) || (c == 7 && r >= gridSize - 8);
-                        bool isCenterLogo = (r >= 10 && r <= 14 && c >= 10 && c <= 14);
-
-                        if (isQuietZone || isCenterLogo) continue;
-
-                        if (isFinder)
-                        {
-                            int lr = r >= gridSize - 7 ? r - (gridSize - 7) : r;
-                            int lc = c >= gridSize - 7 ? c - (gridSize - 7) : c;
-                            if (lr == 0 || lr == 6 || lc == 0 || lc == 6 || (lr >= 2 && lr <= 4 && lc >= 2 && lc <= 4))
-                            {
-                                g.FillRectangle(black, offsetX + c * cellSize, offsetY + r * cellSize, cellSize, cellSize);
-                            }
-                        }
-                        else if (rnd.Next(100) < 50)
-                        {
-                            g.FillRectangle(black, offsetX + c * cellSize, offsetY + r * cellSize, cellSize, cellSize);
-                        }
-                    }
-                }
-
-                Rectangle logoRect = new Rectangle(offsetX + 10 * cellSize, offsetY + 10 * cellSize, 5 * cellSize, 5 * cellSize);
-                g.FillRectangle(white, logoRect);
-                using (Font fLogo = new Font("Segoe UI", 14, FontStyle.Bold))
-                {
-                    StringFormat sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                    g.DrawString("V", fLogo, red, logoRect, sf);
-                }
-            }
-        }
-
-
         private void FrmMainPOS_Load(object sender, EventArgs e)
         {
-
         }
-
     }
 }

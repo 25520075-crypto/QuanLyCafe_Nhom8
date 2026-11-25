@@ -68,20 +68,20 @@ namespace Protocol
             Buffer.BlockCopy(lengthHeader, 0, buffer, 0, 4);
             Buffer.BlockCopy(payload, 0, buffer, 4, payload.Length);
 
-            await stream.WriteAsync(buffer, 0, buffer.Length);
-            await stream.FlushAsync();
+            await stream.WriteAsync(buffer, 0, buffer.Length).ConfigureAwait(false);
+            await stream.FlushAsync().ConfigureAwait(false);
         }
 
         public static async Task<PacketMessage> ReceivePacketAsync(NetworkStream stream)
         {
-            byte[] header = await ReadExactBytesAsync(stream, 4);
+            byte[] header = await ReadExactBytesAsync(stream, 4).ConfigureAwait(false);
             if (header == null) return null;
 
             int payloadLength = BitConverter.ToInt32(header, 0);
             if (payloadLength <= 0 || payloadLength > MaxPacketSize)
                 throw new InvalidDataException($"Header độ dài gói không hợp lệ: {payloadLength}");
 
-            byte[] payload = await ReadExactBytesAsync(stream, payloadLength);
+            byte[] payload = await ReadExactBytesAsync(stream, payloadLength).ConfigureAwait(false);
             if (payload == null) return null;
 
             string json = Encoding.UTF8.GetString(payload);
@@ -94,7 +94,7 @@ namespace Protocol
             int totalRead = 0;
             while (totalRead < count)
             {
-                int bytesRead = await stream.ReadAsync(buffer, totalRead, count - totalRead);
+                int bytesRead = await stream.ReadAsync(buffer, totalRead, count - totalRead).ConfigureAwait(false);
                 if (bytesRead == 0) return null; // Client đóng kết nối
                 totalRead += bytesRead;
             }
