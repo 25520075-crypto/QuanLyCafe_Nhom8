@@ -275,6 +275,16 @@ namespace QuanLyCafe_Nhom8.GUI
                 if (dgvBillDetails.Columns["BillDetailId"] != null)
                 {
                     dgvBillDetails.Columns["BillDetailId"].Visible = false;
+                    if (dgvBillDetails.Columns["Đơn giá"] != null)
+                    {
+                        dgvBillDetails.Columns["Đơn giá"].DefaultCellStyle.Format = "N0";
+                        dgvBillDetails.Columns["Đơn giá"].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+                    }
+                    if (dgvBillDetails.Columns["Thành tiền"] != null)
+                    {
+                        dgvBillDetails.Columns["Thành tiền"].DefaultCellStyle.Format = "N0";
+                        dgvBillDetails.Columns["Thành tiền"].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+                    }
                 }
 
                 _currentRawTotal = 0;

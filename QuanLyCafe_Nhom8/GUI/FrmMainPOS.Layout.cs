@@ -131,19 +131,27 @@ namespace QuanLyCafe_Nhom8.GUI
         /// </summary>
         private Bitmap LoadQrImageSafe(decimal amount, string tableName)
         {
-            return SmartPaymentService.GetQrBitmap(amount, tableName);
+            return FetchQrServerFirst(amount, tableName);
         }
 
         /// <summary>
         /// Hàm nạp ảnh VietQR v2 trực tiếp vào PictureBox chỉ định
         /// </summary>
-        private void LoadQrImageSafe(PictureBox targetBox, decimal amount, string tableName)
+        private async void LoadQrImageSafe(PictureBox targetBox, decimal amount, string tableName)
         {
             if (targetBox == null) return;
             try
             {
                 Cursor.Current = Cursors.WaitCursor;
-                Bitmap qrBmp = SmartPaymentService.GetQrBitmap(amount, tableName);
+
+                // Chạy trên luồng nền để giao diện POS không bị khựng khi chờ CafeServer trả ảnh VietQR
+                Bitmap qrBmp = await System.Threading.Tasks.Task.Run(() => FetchQrServerFirst(amount, tableName));
+
+                if (targetBox.IsDisposed)
+                {
+                    qrBmp?.Dispose();
+                    return;
+                }
 
                 Image oldImg = targetBox.Image;
                 targetBox.Image = qrBmp;
@@ -160,6 +168,31 @@ namespace QuanLyCafe_Nhom8.GUI
             {
                 Cursor.Current = Cursors.Default;
             }
+        }
+
+        // Ưu tiên gửi gói tin GET_VIETQR_REQ lên CafeServer; nếu Server lỗi thì tự lấy bản API v2 tại Client làm dự phòng
+        private Bitmap FetchQrServerFirst(decimal amount, string tableName)
+        {
+            try
+            {
+                if (_netClient != null && _netClient.IsConnected)
+                {
+                    Bitmap serverBmp = System.Threading.Tasks.Task
+                        .Run(() => _netClient.GetVietQrBitmapAsync(amount, tableName))
+                        .GetAwaiter().GetResult();
+
+                    if (serverBmp != null && serverBmp.Width > 100)
+                        return serverBmp;
+
+                    serverBmp?.Dispose();
+                }
+            }
+            catch
+            {
+                // CafeServer lỗi mạng/Cloudflare -> tự động rớt xuống gọi SmartPaymentService tại Client
+            }
+
+            return SmartPaymentService.GetQrBitmap(amount, tableName);
         }
 
         private void ShowWarning(string message)
