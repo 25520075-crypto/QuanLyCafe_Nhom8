@@ -279,19 +279,19 @@ namespace QuanLyCafe_Nhom8.Services
 
         public List<TableDTO> GetAllTables()
         {
-            var res = SendRequestAsync(MsgType.GET_TABLES_REQ).GetAwaiter().GetResult();
+            var res = Task.Run(() => SendRequestAsync(MsgType.GET_TABLES_REQ)).GetAwaiter().GetResult();
             return DeserializeOrThrow<List<TableDTO>>(res);
         }
 
         public List<ProductDTO> GetActiveProducts()
         {
-            var res = SendRequestAsync(MsgType.GET_ACTIVE_PRODUCTS_REQ).GetAwaiter().GetResult();
+            var res = Task.Run(() => SendRequestAsync(MsgType.GET_ACTIVE_PRODUCTS_REQ)).GetAwaiter().GetResult();
             return DeserializeOrThrow<List<ProductDTO>>(res);
         }
 
         public DataTable GetBillDetailsByTable(int tableId)
         {
-            var res = SendRequestAsync(MsgType.GET_BILL_DETAILS_REQ, new { TableId = tableId }).GetAwaiter().GetResult();
+            var res = Task.Run(() => SendRequestAsync(MsgType.GET_BILL_DETAILS_REQ, new { TableId = tableId })).GetAwaiter().GetResult();
             var items = DeserializeOrThrow<List<OrderItemDTO>>(res);
 
             DataTable dt = new DataTable();
@@ -309,7 +309,7 @@ namespace QuanLyCafe_Nhom8.Services
 
         public bool VerifyManagerAccount(string username, string password, out string managerFullName)
         {
-            var res = SendRequestAsync(MsgType.VERIFY_MANAGER_REQ, new { Username = username, Password = password }).GetAwaiter().GetResult();
+            var res = Task.Run(() => SendRequestAsync(MsgType.VERIFY_MANAGER_REQ, new { Username = username, Password = password })).GetAwaiter().GetResult();
             var dto = DeserializeOrThrow<ManagerVerifyResponseDTO>(res);
             managerFullName = dto.ManagerFullName ?? "";
             return dto.IsApproved;
@@ -377,7 +377,7 @@ namespace QuanLyCafe_Nhom8.Services
 
         public DataTable GetPendingKitchenItems()
         {
-            var res = SendRequestAsync(MsgType.GET_PENDING_KDS_REQ).GetAwaiter().GetResult();
+            var res = Task.Run(() => SendRequestAsync(MsgType.GET_PENDING_KDS_REQ)).GetAwaiter().GetResult();
             var items = DeserializeOrThrow<List<KitchenItemDTO>>(res);
 
             DataTable dt = new DataTable();
@@ -443,6 +443,18 @@ namespace QuanLyCafe_Nhom8.Services
                 txt.Clear();
                 await SendChatAsync(msg);
             };
+
+
+            // Cho phép bấm phím Enter để gửi tin nhắn luôn (tắt tiếng "bíp" mặc định của Windows)
+            txt.KeyDown += (s, e) =>
+            {
+                if (e.KeyCode == Keys.Enter)
+                {
+                    e.SuppressKeyPress = true;
+                    btn.PerformClick();
+                }
+            };
+
 
             f.Controls.AddRange(new Control[] { rtb, txt, btn });
             refresh();
