@@ -34,7 +34,7 @@ namespace Protocol
 
         // 5. Server Push Broadcast & System
         TABLE_STATUS_CHANGED, MENU_UPDATED,
-        KDS_NEW_ORDER, KDS_ITEM_DONE,
+        KDS_NEW_ORDER, KDS_ITEM_DONE, CHAT_MESSAGE,
         PING, PONG, ERROR, TABLE_BUSY, PERMISSION_DENIED
     }
 

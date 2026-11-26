@@ -6,7 +6,7 @@ namespace CafeServer.DAL
 {
     public static class DatabaseHelper
     {
-        public static string ConnectionString = "Data Source=.;Initial Catalog=CAFE;Integrated Security=True;TrustServerCertificate=True";
+        public static string ConnectionString = System.Configuration.ConfigurationManager.AppSettings["CafeDbConnection"] ?? "Data Source=.;Initial Catalog=CAFE;Integrated Security=True;TrustServerCertificate=True";
 
         public static SqlConnection GetConnection()
         {

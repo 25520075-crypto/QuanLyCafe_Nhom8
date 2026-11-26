@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Configuration;
 using System.Data;
 using System.Drawing;
 using System.IO;
@@ -10,32 +11,54 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using QuanLyCafe_Nhom8.DAL;
-using QuanLyCafe_Nhom8.DTO;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using Protocol;
 
 namespace QuanLyCafe_Nhom8.Services
 {
-    // Danh sách các loại thông điệp (MsgType) theo Hợp đồng BE-FE v1.0
-    public static class MsgType
+    public sealed class NetworkClient
     {
-        public const string PING = "PING";
-        public const string PONG = "PONG";
-        public const string TABLE_STATUS_CHANGED = "TABLE_STATUS_CHANGED";
-        public const string MENU_UPDATED = "MENU_UPDATED";
-        public const string KDS_NEW_ORDER = "KDS_NEW_ORDER";
-        public const string KDS_ITEM_DONE = "KDS_ITEM_DONE";
-        public const string GET_PENDING_KDS = "GET_PENDING_KDS";
-        public const string CHAT_MESSAGE = "CHAT_MESSAGE";
-        public const string STATS_COMMAND = "STATS_COMMAND";
-    }
+        private static readonly Lazy<NetworkClient> _instance = new Lazy<NetworkClient>(() => new NetworkClient());
+        public static NetworkClient Instance => _instance.Value;
 
-    // Thực hiện UDP Broadcast để tự động tìm IP:Port của Server trong mạng LAN
-    public static class UdpDiscoveryClient
-    {
-        public const int UdpDiscoveryPort = 8889;
-        public const int DefaultTcpPort = 8888;
+        private TcpClient _tcpClient;
+        private NetworkStream _stream;
+        private readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1, 1);
+        private readonly SemaphoreSlim _connectLock = new SemaphoreSlim(1, 1);
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<PacketMessage>> _pendingRequests =
+            new ConcurrentDictionary<string, TaskCompletionSource<PacketMessage>>();
 
-        public static async Task<IPEndPoint> DiscoverServerAsync(int timeoutMs = 1200)
+        private CancellationTokenSource _cts;
+        private bool _isStarted = false;
+
+        // Đọc IP Azure VM từ App.config (để trống nếu muốn tự dò UDP trong LAN)
+        public string ConfiguredServerIp { get; set; } =
+            (ConfigurationManager.AppSettings["ServerIp"] ?? "").Trim();
+
+        public string ServerHost { get; private set; } = "127.0.0.1";
+        public int ServerPort { get; private set; } = FramingHelper.DefaultTcpPort;
+        public bool IsConnected => _tcpClient != null && _tcpClient.Connected && _stream != null;
+
+        public event Action<MsgType, string> OnServerEventReceived;
+        public event Action<bool, string> OnConnectionStateChanged;
+
+        public readonly List<string> ChatHistory = new List<string>();
+        private Form _activeChatForm = null;
+
+        private NetworkClient() { }
+
+        public void Start()
+        {
+            if (_isStarted) return;
+            _isStarted = true;
+            _cts = new CancellationTokenSource();
+            Task.Run(() => MaintainConnectionLoopAsync(_cts.Token));
+            Task.Run(() => HeartbeatLoopAsync(_cts.Token));
+        }
+
+        // Tự dò Server qua UDP Broadcast cổng 9001 (chỉ dùng khi chạy LAN & không cấu hình IP Azure)
+        private async Task<IPEndPoint> DiscoverLanServerAsync(int timeoutMs = 1200)
         {
             return await Task.Run(() =>
             {
@@ -46,142 +69,109 @@ namespace QuanLyCafe_Nhom8.Services
                         udp.EnableBroadcast = true;
                         udp.Client.ReceiveTimeout = timeoutMs;
 
-                        byte[] reqBytes = Encoding.UTF8.GetBytes("COFFEE_FEFA_DISCOVER_REQ");
-                        IPEndPoint broadcastEp = new IPEndPoint(IPAddress.Broadcast, UdpDiscoveryPort);
-                        udp.Send(reqBytes, reqBytes.Length, broadcastEp);
+                        byte[] reqBytes = Encoding.UTF8.GetBytes(FramingHelper.DiscoveryRequest);
+                        udp.Send(reqBytes, reqBytes.Length, new IPEndPoint(IPAddress.Broadcast, FramingHelper.DefaultUdpPort));
 
                         IPEndPoint remoteEp = new IPEndPoint(IPAddress.Any, 0);
                         byte[] respBytes = udp.Receive(ref remoteEp);
                         string resp = Encoding.UTF8.GetString(respBytes).Trim();
 
-                        // Phản hồi từ UDP Responder dạng: COFFEE_FEFA_SERVER|192.168.1.10|8888
-                        if (resp.StartsWith("COFFEE_FEFA_SERVER", StringComparison.OrdinalIgnoreCase))
+                        if (resp.StartsWith(FramingHelper.DiscoveryResponsePrefix, StringComparison.OrdinalIgnoreCase))
                         {
-                            string[] parts = resp.Split('|');
-                            if (parts.Length >= 3 && IPAddress.TryParse(parts[1], out IPAddress ip) && int.TryParse(parts[2], out int port))
-                            {
-                                return new IPEndPoint(ip, port);
-                            }
-                            return new IPEndPoint(remoteEp.Address, DefaultTcpPort);
+                            string portStr = resp.Substring(FramingHelper.DiscoveryResponsePrefix.Length);
+                            int port = int.TryParse(portStr, out int p) ? p : FramingHelper.DefaultTcpPort;
+                            return new IPEndPoint(remoteEp.Address, port);
                         }
                     }
                 }
-                catch
-                {
-                    // Fallback về Loopback 127.0.0.1 nếu Firewall chặn Broadcast
-                }
-                return new IPEndPoint(IPAddress.Loopback, DefaultTcpPort);
-            });
+                catch { }
+                return new IPEndPoint(IPAddress.Loopback, FramingHelper.DefaultTcpPort);
+            }).ConfigureAwait(false);
         }
-    }
 
-    // Thư viện NetworkClient dùng chung cho toàn bộ các màn hình Client (TCP Length-Prefix 4 byte + Auto-Reconnect + Heartbeat)
-    public sealed class NetworkClient
-    {
-        private static readonly Lazy<NetworkClient> _instance = new Lazy<NetworkClient>(() => new NetworkClient());
-        public static NetworkClient Instance => _instance.Value;
-
-        public const int MaxPayloadSize = 1024 * 1024; // Giới hạn gói tin <= 1MB chống tràn bộ nhớ
-        private TcpClient _tcpClient;
-        private NetworkStream _stream;
-        private readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1, 1);
-        private CancellationTokenSource _cts;
-        private bool _isStarted = false;
-
-        public string ServerHost { get; private set; } = "127.0.0.1";
-        public int ServerPort { get; private set; } = UdpDiscoveryClient.DefaultTcpPort;
-        public bool IsConnected => _tcpClient != null && _tcpClient.Connected;
-
-        // Sự kiện đẩy về cho các Form (FrmMainPOS, FrmKDS, FrmChat) đăng ký nhận Realtime
-        public event Action<string, string> OnServerEventReceived;
-        public event Action<bool, string> OnConnectionStateChanged;
-
-        // Lưu lịch sử Chat & Thống kê nội bộ trong phiên làm việc
-        public readonly List<string> ChatHistory = new List<string>();
-
-        private readonly PosServiceDAL _posDal = new PosServiceDAL();
-
-        private NetworkClient() { }
-
-        // Khởi động cả Embedded TCP/UDP Server (nếu máy hiện tại đóng vai Server) và kết nối TcpSessionClient
-        public void Start()
+        private async Task<bool> EnsureConnectedAsync()
         {
-            if (_isStarted) return;
-            _isStarted = true;
+            if (IsConnected) return true;
 
-            EmbeddedLanServer.EnsureRunning();
-            _cts = new CancellationTokenSource();
-            Task.Run(() => MaintainConnectionLoopAsync(_cts.Token));
-            Task.Run(() => HeartbeatLoopAsync(_cts.Token));
+            await _connectLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (IsConnected) return true;
+
+                if (!string.IsNullOrWhiteSpace(ConfiguredServerIp))
+                {
+                    ServerHost = ConfiguredServerIp;
+                    ServerPort = int.TryParse(ConfigurationManager.AppSettings["ServerPort"], out int cfgPort)
+                        ? cfgPort
+                        : FramingHelper.DefaultTcpPort;
+                }
+                else
+                {
+                    IPEndPoint ep = await DiscoverLanServerAsync(1000).ConfigureAwait(false);
+                    ServerHost = ep.Address.ToString();
+                    ServerPort = ep.Port;
+                }
+
+                _tcpClient?.Close();
+                _tcpClient = new TcpClient();
+
+                var connectTask = _tcpClient.ConnectAsync(ServerHost, ServerPort);
+                var finished = await Task.WhenAny(connectTask, Task.Delay(4000)).ConfigureAwait(false);
+                if (finished != connectTask || !_tcpClient.Connected)
+                {
+                    _tcpClient.Close();
+                    return false;
+                }
+
+                _stream = _tcpClient.GetStream();
+                OnConnectionStateChanged?.Invoke(true, $"Đã kết nối TCP ({ServerHost}:{ServerPort})");
+
+                _ = Task.Run(() => ReceiveLoopAsync(_cts?.Token ?? CancellationToken.None));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                OnConnectionStateChanged?.Invoke(false, $"Lỗi kết nối ({ServerHost}:{ServerPort}): {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                _connectLock.Release();
+            }
         }
 
-        // Vòng lặp tự động tìm Server qua UDP, kết nối TCP và tự động Reconnect khi rớt mạng
         private async Task MaintainConnectionLoopAsync(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
             {
                 if (!IsConnected)
                 {
-                    try
-                    {
-                        IPEndPoint ep = await UdpDiscoveryClient.DiscoverServerAsync(800);
-                        ServerHost = ep.Address.ToString();
-                        ServerPort = ep.Port;
-
-                        _tcpClient?.Close();
-                        _tcpClient = new TcpClient();
-                        await _tcpClient.ConnectAsync(ServerHost, ServerPort);
-                        _stream = _tcpClient.GetStream();
-
-                        OnConnectionStateChanged?.Invoke(true, $"Đã kết nối TCP ({ServerHost}:{ServerPort})");
-
-                        // Bắt đầu đọc luồng khung 4-byte Length-Prefix từ Server
-                        await ReceiveLoopAsync(token);
-                    }
-                    catch
-                    {
-                        OnConnectionStateChanged?.Invoke(false, "Đang tự động kết nối lại TCP Server...");
-                    }
+                    await EnsureConnectedAsync().ConfigureAwait(false);
                 }
-                await Task.Delay(2500, token);
+                await Task.Delay(3000, token).ConfigureAwait(false);
             }
         }
 
-        // Vòng lặp gửi Heartbeat PING định kỳ mỗi 10 giây
         private async Task HeartbeatLoopAsync(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
             {
-                await Task.Delay(10000, token);
+                await Task.Delay(10000, token).ConfigureAwait(false);
                 if (IsConnected)
                 {
-                    await SendFrameAsync(MsgType.PING, "PING");
+                    try { await SendPacketInternalAsync(new PacketMessage { Type = MsgType.PING }).ConfigureAwait(false); }
+                    catch { }
                 }
             }
         }
 
-        // Gửi gói tin theo đúng chuẩn 4-byte Int32 Length-Prefix + Payload UTF-8
-        public async Task<bool> SendFrameAsync(string msgType, string payload = "")
+        private async Task SendPacketInternalAsync(PacketMessage packet)
         {
-            if (!IsConnected || _stream == null) return false;
-
-            string packet = $"{msgType}|{payload}";
-            byte[] payloadBytes = Encoding.UTF8.GetBytes(packet);
-            if (payloadBytes.Length > MaxPayloadSize) return false;
-
-            byte[] lengthPrefix = BitConverter.GetBytes(payloadBytes.Length);
-
-            await _writeLock.WaitAsync();
+            await _writeLock.WaitAsync().ConfigureAwait(false);
             try
             {
-                await _stream.WriteAsync(lengthPrefix, 0, 4);
-                await _stream.WriteAsync(payloadBytes, 0, payloadBytes.Length);
-                await _stream.FlushAsync();
-                return true;
-            }
-            catch
-            {
-                return false;
+                if (!IsConnected) throw new IOException("Chưa kết nối tới CafeServer.");
+                await FramingHelper.SendPacketAsync(_stream, packet).ConfigureAwait(false);
             }
             finally
             {
@@ -189,537 +179,274 @@ namespace QuanLyCafe_Nhom8.Services
             }
         }
 
-        // Đọc chính xác 4 byte header độ dài trước, sau đó đọc đủ N byte payload chống dính/phân mảnh gói TCP
         private async Task ReceiveLoopAsync(CancellationToken token)
         {
-            byte[] lenBuffer = new byte[4];
-
-            while (!token.IsCancellationRequested && IsConnected)
-            {
-                int readHeader = await ReadExactBytesAsync(_stream, lenBuffer, 4, token);
-                if (readHeader < 4) break;
-
-                int payloadLength = BitConverter.ToInt32(lenBuffer, 0);
-                if (payloadLength <= 0 || payloadLength > MaxPayloadSize) break;
-
-                byte[] payloadBuffer = new byte[payloadLength];
-                int readPayload = await ReadExactBytesAsync(_stream, payloadBuffer, payloadLength, token);
-                if (readPayload < payloadLength) break;
-
-                string rawPacket = Encoding.UTF8.GetString(payloadBuffer);
-                int sepIndex = rawPacket.IndexOf('|');
-                string msgType = sepIndex >= 0 ? rawPacket.Substring(0, sepIndex) : rawPacket;
-                string content = sepIndex >= 0 ? rawPacket.Substring(sepIndex + 1) : "";
-
-                if (msgType == MsgType.PONG) continue;
-
-                if (msgType == MsgType.CHAT_MESSAGE)
-                {
-                    lock (ChatHistory)
-                    {
-                        ChatHistory.Add(content);
-                    }
-                }
-
-                OnServerEventReceived?.Invoke(msgType, content);
-            }
-
-            OnConnectionStateChanged?.Invoke(false, "Mất kết nối TCP - Đang kết nối lại...");
-        }
-
-        private static async Task<int> ReadExactBytesAsync(NetworkStream stream, byte[] buffer, int count, CancellationToken token)
-        {
-            int totalRead = 0;
-            while (totalRead < count)
-            {
-                int read = await stream.ReadAsync(buffer, totalRead, count - totalRead, token);
-                if (read <= 0) return totalRead;
-                totalRead += read;
-            }
-            return totalRead;
-        }
-
-        // ==================== CÁC HÀM GỌI NGHIỆP VỤ POS & KDS QUA NETWORKCLIENT ====================
-
-        public List<TableDTO> GetAllTables() => _posDal.GetAllTables();
-
-        public List<ProductDTO> GetActiveProducts() => _posDal.GetActiveProducts();
-
-        public DataTable GetBillDetailsByTable(int tableId) => _posDal.GetBillDetailsByTable(tableId);
-
-        public bool VerifyManagerAccount(string username, string password, out string managerFullName) =>
-            _posDal.VerifyManagerAccount(username, password, out managerFullName);
-
-        public async Task AddItemToTableAsync(int tableId, int productId, int quantity)
-        {
-            await Task.Run(() => _posDal.AddItemToTable(tableId, productId, quantity));
-            await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, tableId.ToString());
-        }
-
-        public async Task<int> SendTableOrderToKitchenAsync(int tableId, string tableName)
-        {
-            int count = await Task.Run(() => _posDal.SendTableOrderToKitchen(tableId));
-            if (count > 0)
-            {
-                await SendFrameAsync(MsgType.KDS_NEW_ORDER, $"{tableId}|{tableName}|{count}");
-                await SendFrameAsync(MsgType.CHAT_MESSAGE, $"[Quầy Thu Ngân]: Đã gửi {count} món của {tableName} xuống Quầy Pha Chế!");
-            }
-            return count;
-        }
-
-        public async Task RemoveBillDetailItemAsync(int billDetailId, int tableId, string tableName, string itemName, bool isSentToKitchen, string managerName)
-        {
-            await Task.Run(() => _posDal.RemoveBillDetailItem(billDetailId, tableId));
-            await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, tableId.ToString());
-            await SendFrameAsync(MsgType.KDS_NEW_ORDER, tableId.ToString());
-
-            if (isSentToKitchen)
-            {
-                string alert = $"⚠️ [CẢNH BÁO HỦY MÓN] Bàn: {tableName} | Món: {itemName} | Duyệt bởi: {managerName} ({DateTime.Now:HH:mm:ss})";
-                await SendFrameAsync(MsgType.CHAT_MESSAGE, alert);
-            }
-        }
-
-        public async Task MoveToEmptyTableAsync(int sourceTableId, int targetTableId)
-        {
-            await Task.Run(() => _posDal.MoveToEmptyTable(sourceTableId, targetTableId));
-            await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, $"{sourceTableId},{targetTableId}");
-        }
-
-        public async Task MergeOccupiedTablesAsync(int sourceTableId, int targetTableId)
-        {
-            await Task.Run(() => _posDal.MergeOccupiedTables(sourceTableId, targetTableId));
-            await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, $"{sourceTableId},{targetTableId}");
-        }
-
-        public async Task<CheckoutResponseDTO> CheckoutTableAsync(int tableId, string tableName, int discountPercent, string paymentMethod)
-        {
-            decimal finalPaid = 0;
-            bool ok = await Task.Run(() => _posDal.CheckoutTable(tableId, discountPercent, paymentMethod, out finalPaid));
-            if (ok)
-            {
-                await SendFrameAsync(MsgType.TABLE_STATUS_CHANGED, tableId.ToString());
-                await SendFrameAsync(MsgType.CHAT_MESSAGE, $"💰 [THANH TOÁN] {tableName}: +{finalPaid:N0} VNĐ ({paymentMethod})");
-            }
-            return new CheckoutResponseDTO
-            {
-                IsSuccess = ok,
-                TableId = tableId,
-                FinalAmount = finalPaid
-            };
-        }
-
-        public DataTable GetPendingKitchenItems() => _posDal.GetPendingKitchenItems();
-
-        public async Task MarkKitchenItemDoneAsync(int billDetailId, string tableName, string productName)
-        {
-            await Task.Run(() => _posDal.MarkKitchenItemDone(billDetailId));
-            await SendFrameAsync(MsgType.KDS_ITEM_DONE, $"{billDetailId}|{tableName}|{productName}");
-            await SendFrameAsync(MsgType.CHAT_MESSAGE, $"✅ [Quầy Pha Chế]: Đã làm xong món [{productName}] cho [{tableName}]!");
-        }
-
-        // ==================== CỬA SỔ CHAT NỘI BỘ & TRA CỨU THỐNG KÊ TRÊN APP (THAY TELEGRAM BOT) ====================
-
-        private Form _activeChatForm = null;
-
-        public void ShowInAppChatAndStatsDialog(Form parentForm, string currentRoleName = "Quản lý / Thu ngân")
-        {
-            // Nếu cửa sổ Chat đang mở sẵn thì đưa lên trên cùng, cho phép kéo thả song song với màn hình POS
-            if (_activeChatForm != null && !_activeChatForm.IsDisposed)
-            {
-                _activeChatForm.BringToFront();
-                _activeChatForm.Focus();
-                return;
-            }
-
-            Form chatForm = new Form
-            {
-                Text = $"Chat Nội Bộ LAN & Bot Thống Kê Trên App (TCP {ServerHost}:{ServerPort})",
-                Size = new Size(760, 560),
-                StartPosition = FormStartPosition.Manual,
-                Location = new Point(560, 140),
-                BackColor = Color.FromArgb(244, 239, 234)
-            };
-            _activeChatForm = chatForm;
-
-            Panel pnlHeader = new Panel
-            {
-                Dock = DockStyle.Top,
-                Height = 56,
-                BackColor = Color.FromArgb(62, 39, 35)
-            };
-
-            Label lblHeader = new Label
-            {
-                Text = "💬 KÊNH CHAT NỘI BỘ LAN && TRA CỨU THỐNG KÊ NHANH TRÊN APP",
-                Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
-                ForeColor = Color.FromArgb(255, 224, 178),
-                Location = new Point(16, 16),
-                AutoSize = true
-            };
-            pnlHeader.Controls.Add(lblHeader);
-
-            RichTextBox rtbChat = new RichTextBox
-            {
-                Location = new Point(16, 70),
-                Size = new Size(710, 340),
-                ReadOnly = true,
-                BackColor = Color.White,
-                Font = new Font("Segoe UI", 10f),
-                BorderStyle = BorderStyle.FixedSingle
-            };
-
-            // 4 nút lệnh vừa vặn chiều rộng, không bị khuất chữ
-            Button btnCmdToday = CreateQuickCmdButton("📊 /homnay (Hôm nay)", new Point(16, 420), 172, async () =>
-                await SendFrameAsync(MsgType.STATS_COMMAND, "/homnay"));
-
-            Button btnCmdYesterday = CreateQuickCmdButton("📅 /homqua (Hôm qua)", new Point(195, 420), 172, async () =>
-                await SendFrameAsync(MsgType.STATS_COMMAND, "/homqua"));
-
-            Button btnCmdTables = CreateQuickCmdButton("☕ /ban (Bàn có khách)", new Point(374, 420), 172, async () =>
-                await SendFrameAsync(MsgType.STATS_COMMAND, "/ban"));
-
-            Button btnCmdCancelLog = CreateQuickCmdButton("⚠️ /huymon (Hủy món)", new Point(553, 420), 173, async () =>
-                await SendFrameAsync(MsgType.STATS_COMMAND, "/huymon"));
-
-            TextBox txtMsg = new TextBox
-            {
-                Location = new Point(16, 466),
-                Size = new Size(575, 32),
-                Font = new Font("Segoe UI", 10.5f)
-            };
-
-            Button btnSend = new Button
-            {
-                Text = "Gửi TCP ➔",
-                Location = new Point(600, 464),
-                Size = new Size(126, 34),
-                BackColor = Color.FromArgb(39, 174, 96),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-                Cursor = Cursors.Hand
-            };
-            btnSend.FlatAppearance.BorderSize = 0;
-
-            Action refreshChatBox = () =>
-            {
-                if (rtbChat.IsDisposed) return;
-                StringBuilder sb = new StringBuilder();
-                sb.AppendLine("💡 MẸO: Bấm các nút bên dưới hoặc gõ /homnay, /homqua, /ban, /huymon để tra cứu qua TCP Socket!");
-                sb.AppendLine("--------------------------------------------------------------------------------");
-                lock (ChatHistory)
-                {
-                    foreach (string line in ChatHistory)
-                    {
-                        sb.AppendLine(line);
-                        sb.AppendLine();
-                    }
-                }
-                rtbChat.Text = sb.ToString();
-                rtbChat.SelectionStart = rtbChat.Text.Length;
-                rtbChat.ScrollToCaret();
-            };
-
-            Action<string, string> eventHandler = (type, payload) =>
-            {
-                if (type == MsgType.CHAT_MESSAGE && !chatForm.IsDisposed && chatForm.IsHandleCreated)
-                {
-                    chatForm.BeginInvoke(new Action(refreshChatBox));
-                }
-            };
-
-            OnServerEventReceived += eventHandler;
-            chatForm.FormClosing += (s, e) => OnServerEventReceived -= eventHandler;
-
-            Func<Task> sendAction = async () =>
-            {
-                string raw = txtMsg.Text.Trim();
-                if (string.IsNullOrEmpty(raw)) return;
-                txtMsg.Clear();
-
-                if (raw.StartsWith("/"))
-                {
-                    await SendFrameAsync(MsgType.STATS_COMMAND, raw);
-                }
-                else
-                {
-                    await SendFrameAsync(MsgType.CHAT_MESSAGE, $"[{currentRoleName} - {DateTime.Now:HH:mm}]: {raw}");
-                }
-            };
-
-            btnSend.Click += async (s, e) => await sendAction();
-            txtMsg.KeyDown += async (s, e) =>
-            {
-                if (e.KeyCode == Keys.Enter)
-                {
-                    e.SuppressKeyPress = true;
-                    await sendAction();
-                }
-            };
-
-            refreshChatBox();
-
-            chatForm.Controls.AddRange(new Control[]
-            {
-                pnlHeader, rtbChat,
-                btnCmdToday, btnCmdYesterday, btnCmdTables, btnCmdCancelLog,
-                txtMsg, btnSend
-            });
-
-            // Mở dạng Non-Modal (.Show) để người dùng vừa để bảng Chat vừa bấm & kéo thả màn hình POS bên dưới
-            chatForm.TopMost = true;
-            chatForm.Show(parentForm);
-        }
-
-        private static Button CreateQuickCmdButton(string text, Point loc, int width, Func<Task> onClick)
-        {
-            Button btn = new Button
-            {
-                Text = text,
-                Location = loc,
-                Size = new Size(width, 34),
-                BackColor = Color.FromArgb(41, 128, 185),
-                ForeColor = Color.White,
-                FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
-                Cursor = Cursors.Hand
-            };
-            btn.FlatAppearance.BorderSize = 0;
-            btn.Click += async (s, e) => await onClick();
-            return btn;
-        }
-    }
-
-    // Máy chủ TCP Đa luồng & UDP Responder tích hợp sẵn (Giúp điều phối gói tin 4-byte Length-Prefix giữa các Client)
-    internal static class EmbeddedLanServer
-    {
-        private static bool _running = false;
-        private static TcpListener _listener;
-        private static readonly ConcurrentDictionary<Guid, TcpClient> _clients = new ConcurrentDictionary<Guid, TcpClient>();
-
-        public static void EnsureRunning()
-        {
-            if (_running) return;
-            _running = true;
-
-            Task.Run(StartUdpResponderLoop);
-            Task.Run(StartTcpServerLoop);
-        }
-
-        private static void StartUdpResponderLoop()
-        {
             try
             {
-                using (UdpClient udpServer = new UdpClient(UdpDiscoveryClient.UdpDiscoveryPort))
+                while (!token.IsCancellationRequested && IsConnected)
                 {
-                    IPEndPoint remoteEp = new IPEndPoint(IPAddress.Any, 0);
-                    while (true)
+                    PacketMessage packet = await FramingHelper.ReceivePacketAsync(_stream).ConfigureAwait(false);
+                    if (packet == null) break;
+
+                    if (packet.Type == MsgType.PONG) continue;
+
+                    // Nếu là phản hồi của 1 Request đang chờ -> trả về đúng TaskCompletionSource
+                    if (!string.IsNullOrEmpty(packet.RequestId) &&
+                        _pendingRequests.TryRemove(packet.RequestId, out var tcs))
                     {
-                        byte[] data = udpServer.Receive(ref remoteEp);
-                        string msg = Encoding.UTF8.GetString(data).Trim();
-                        if (msg == "COFFEE_FEFA_DISCOVER_REQ")
+                        tcs.TrySetResult(packet);
+                        continue;
+                    }
+
+                    // Nếu là gói Server Broadcast (Realtime Push)
+                    if (packet.Type == MsgType.CHAT_MESSAGE)
+                    {
+                        lock (ChatHistory)
                         {
-                            string reply = $"COFFEE_FEFA_SERVER|127.0.0.1|{UdpDiscoveryClient.DefaultTcpPort}";
-                            byte[] replyBytes = Encoding.UTF8.GetBytes(reply);
-                            udpServer.Send(replyBytes, replyBytes.Length, remoteEp);
+                            try
+                            {
+                                var obj = JObject.Parse(packet.PayloadJson);
+                                ChatHistory.Add(obj["Text"]?.ToString() ?? packet.PayloadJson);
+                            }
+                            catch { ChatHistory.Add(packet.PayloadJson); }
                         }
                     }
-                }
-            }
-            catch
-            {
-                // Cổng UDP đã có tiến trình Server khác lắng nghe
-            }
-        }
 
-        private static async Task StartTcpServerLoop()
-        {
-            try
-            {
-                _listener = new TcpListener(IPAddress.Any, UdpDiscoveryClient.DefaultTcpPort);
-                _listener.Start();
-
-                while (true)
-                {
-                    TcpClient client = await _listener.AcceptTcpClientAsync();
-                    Guid clientId = Guid.NewGuid();
-                    _clients[clientId] = client;
-                    _ = Task.Run(() => HandleClientAsync(clientId, client));
-                }
-            }
-            catch
-            {
-                // Cổng TCP 8888 đã có tiến trình Server riêng lắng nghe
-            }
-        }
-
-        private static async Task HandleClientAsync(Guid clientId, TcpClient client)
-        {
-            try
-            {
-                using (client)
-                using (NetworkStream stream = client.GetStream())
-                {
-                    byte[] lenBuf = new byte[4];
-                    while (client.Connected)
-                    {
-                        int rLen = await ReadExactAsync(stream, lenBuf, 4);
-                        if (rLen < 4) break;
-
-                        int size = BitConverter.ToInt32(lenBuf, 0);
-                        if (size <= 0 || size > NetworkClient.MaxPayloadSize) break;
-
-                        byte[] payloadBuf = new byte[size];
-                        int rPay = await ReadExactAsync(stream, payloadBuf, size);
-                        if (rPay < size) break;
-
-                        string packet = Encoding.UTF8.GetString(payloadBuf);
-                        int idx = packet.IndexOf('|');
-                        string type = idx >= 0 ? packet.Substring(0, idx) : packet;
-                        string body = idx >= 0 ? packet.Substring(idx + 1) : "";
-
-                        if (type == MsgType.PING)
-                        {
-                            await SendSingleClientAsync(client, $"{MsgType.PONG}|PONG");
-                            continue;
-                        }
-
-                        if (type == MsgType.STATS_COMMAND)
-                        {
-                            string report = BuildStatsReportForAppChat(body);
-                            await BroadcastPacketAsync($"{MsgType.CHAT_MESSAGE}|{report}");
-                            continue;
-                        }
-
-                        // Broadcast sự kiện (KDS_NEW_ORDER, KDS_ITEM_DONE, TABLE_STATUS_CHANGED, CHAT_MESSAGE) tới toàn bộ Client
-                        await BroadcastPacketAsync(packet);
-                    }
+                    OnServerEventReceived?.Invoke(packet.Type, packet.PayloadJson);
                 }
             }
             catch { }
             finally
             {
-                _clients.TryRemove(clientId, out _);
-            }
-        }
-
-        private static async Task BroadcastPacketAsync(string packet)
-        {
-            byte[] payload = Encoding.UTF8.GetBytes(packet);
-            byte[] prefix = BitConverter.GetBytes(payload.Length);
-
-            foreach (var kv in _clients)
-            {
-                try
+                foreach (var kv in _pendingRequests)
                 {
-                    if (kv.Value.Connected)
-                    {
-                        NetworkStream ns = kv.Value.GetStream();
-                        await ns.WriteAsync(prefix, 0, 4);
-                        await ns.WriteAsync(payload, 0, payload.Length);
-                        await ns.FlushAsync();
-                    }
+                    if (_pendingRequests.TryRemove(kv.Key, out var tcs))
+                        tcs.TrySetException(new IOException("Mất kết nối tới CafeServer."));
                 }
-                catch { }
+                try { _tcpClient?.Close(); } catch { }
+                _stream = null;
+                OnConnectionStateChanged?.Invoke(false, "Mất kết nối TCP - Đang kết nối lại...");
             }
         }
 
-        private static async Task SendSingleClientAsync(TcpClient client, string packet)
+        // Hàm gửi Request chuẩn Protocol và chờ phản hồi theo RequestId
+        public async Task<PacketMessage> SendRequestAsync(MsgType type, object payload = null, int timeoutMs = 8000)
         {
+            if (!await EnsureConnectedAsync().ConfigureAwait(false))
+                throw new Exception($"Không kết nối được tới CafeServer ({ServerHost}:{ServerPort}).");
+
+            var req = new PacketMessage
+            {
+                RequestId = Guid.NewGuid().ToString("N"),
+                Type = type,
+                PayloadJson = payload == null ? "{}" : JsonConvert.SerializeObject(payload)
+            };
+
+            var tcs = new TaskCompletionSource<PacketMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _pendingRequests[req.RequestId] = tcs;
+
             try
             {
-                byte[] payload = Encoding.UTF8.GetBytes(packet);
-                byte[] prefix = BitConverter.GetBytes(payload.Length);
-                NetworkStream ns = client.GetStream();
-                await ns.WriteAsync(prefix, 0, 4);
-                await ns.WriteAsync(payload, 0, payload.Length);
-                await ns.FlushAsync();
+                await SendPacketInternalAsync(req).ConfigureAwait(false);
+                var completed = await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs)).ConfigureAwait(false);
+                if (completed != tcs.Task)
+                    throw new TimeoutException($"Server không phản hồi yêu cầu {type} sau {timeoutMs / 1000}s.");
+
+                return await tcs.Task.ConfigureAwait(false);
             }
+            finally
+            {
+                _pendingRequests.TryRemove(req.RequestId, out _);
+            }
+        }
+
+        private static T DeserializeOrThrow<T>(PacketMessage res)
+        {
+            if (!res.Success) throw new Exception(string.IsNullOrWhiteSpace(res.Message) ? res.ErrorCode : res.Message);
+            return JsonConvert.DeserializeObject<T>(res.PayloadJson);
+        }
+
+        // ==================== API AUTH (CHO FrmAuth) ====================
+
+        public async Task<UserDTO> LoginAsync(string username, string password)
+        {
+            var res = await SendRequestAsync(MsgType.LOGIN_REQ, new { Username = username, Password = password }).ConfigureAwait(false);
+            if (!res.Success) return null;
+            return JsonConvert.DeserializeObject<UserDTO>(res.PayloadJson);
+        }
+
+        // ==================== API POS & KDS (TƯƠNG THÍCH FrmMainPOS / FrmKDS) ====================
+
+        public List<TableDTO> GetAllTables()
+        {
+            var res = SendRequestAsync(MsgType.GET_TABLES_REQ).GetAwaiter().GetResult();
+            return DeserializeOrThrow<List<TableDTO>>(res);
+        }
+
+        public List<ProductDTO> GetActiveProducts()
+        {
+            var res = SendRequestAsync(MsgType.GET_ACTIVE_PRODUCTS_REQ).GetAwaiter().GetResult();
+            return DeserializeOrThrow<List<ProductDTO>>(res);
+        }
+
+        public DataTable GetBillDetailsByTable(int tableId)
+        {
+            var res = SendRequestAsync(MsgType.GET_BILL_DETAILS_REQ, new { TableId = tableId }).GetAwaiter().GetResult();
+            var items = DeserializeOrThrow<List<OrderItemDTO>>(res);
+
+            DataTable dt = new DataTable();
+            dt.Columns.Add("BillDetailId", typeof(int));
+            dt.Columns.Add("Tên món", typeof(string));
+            dt.Columns.Add("SL", typeof(int));
+            dt.Columns.Add("Đơn giá", typeof(decimal));
+            dt.Columns.Add("Thành tiền", typeof(decimal));
+            dt.Columns.Add("Trạng thái", typeof(string));
+
+            foreach (var it in items)
+                dt.Rows.Add(it.BillDetailId, it.ProductName, it.Quantity, it.UnitPrice, it.SubTotal, it.KitchenStatus);
+            return dt;
+        }
+
+        public bool VerifyManagerAccount(string username, string password, out string managerFullName)
+        {
+            var res = SendRequestAsync(MsgType.VERIFY_MANAGER_REQ, new { Username = username, Password = password }).GetAwaiter().GetResult();
+            var dto = DeserializeOrThrow<ManagerVerifyResponseDTO>(res);
+            managerFullName = dto.ManagerFullName ?? "";
+            return dto.IsApproved;
+        }
+
+        public async Task AddItemToTableAsync(int tableId, int productId, int quantity)
+        {
+            var res = await SendRequestAsync(MsgType.ADD_ITEM_REQ, new { TableId = tableId, ProductId = productId, Quantity = quantity }).ConfigureAwait(false);
+            if (!res.Success) throw new Exception(res.Message);
+        }
+
+        public async Task<int> SendTableOrderToKitchenAsync(int tableId, string tableName)
+        {
+            var res = await SendRequestAsync(MsgType.SEND_KITCHEN_REQ, new { TableId = tableId }).ConfigureAwait(false);
+            if (!res.Success) throw new Exception(res.Message);
+            int count = JObject.Parse(res.PayloadJson)["SentCount"]?.Value<int>() ?? 0;
+            if (count > 0)
+                await SendChatAsync($"[Quầy Thu Ngân]: Đã gửi {count} món của {tableName} xuống Quầy Pha Chế!").ConfigureAwait(false);
+            return count;
+        }
+
+        public async Task RemoveBillDetailItemAsync(int billDetailId, int tableId, string tableName, string itemName, bool isSentToKitchen, string managerName)
+        {
+            var res = await SendRequestAsync(MsgType.REMOVE_ITEM_REQ, new { TableId = tableId, BillDetailId = billDetailId }).ConfigureAwait(false);
+            if (!res.Success) throw new Exception(res.Message);
+            if (isSentToKitchen)
+                await SendChatAsync($"⚠️ [CẢNH BÁO HỦY MÓN] Bàn: {tableName} | Món: {itemName} | Duyệt: {managerName}").ConfigureAwait(false);
+        }
+
+        public async Task MoveToEmptyTableAsync(int sourceTableId, int targetTableId)
+        {
+            var res = await SendRequestAsync(MsgType.MOVE_TABLE_REQ, new { SourceTableId = sourceTableId, TargetTableId = targetTableId }).ConfigureAwait(false);
+            if (!res.Success) throw new Exception(res.Message);
+        }
+
+        public async Task MergeOccupiedTablesAsync(int sourceTableId, int targetTableId)
+        {
+            var res = await SendRequestAsync(MsgType.MERGE_TABLE_REQ, new { SourceTableId = sourceTableId, TargetTableId = targetTableId }).ConfigureAwait(false);
+            if (!res.Success) throw new Exception(res.Message);
+        }
+
+        public async Task<CheckoutResponseDTO> CheckoutTableAsync(int tableId, string tableName, int discountPercent, string paymentMethod)
+        {
+            var res = await SendRequestAsync(MsgType.CHECKOUT_REQ, new
+            {
+                TableId = tableId,
+                DiscountPercent = discountPercent,
+                PaymentMethod = paymentMethod
+            }).ConfigureAwait(false);
+            var dto = DeserializeOrThrow<CheckoutResponseDTO>(res);
+            if (dto.IsSuccess)
+                await SendChatAsync($"💰 [THANH TOÁN] {tableName}: +{dto.FinalAmount:N0} VNĐ ({paymentMethod})").ConfigureAwait(false);
+            return dto;
+        }
+
+        public async Task<Bitmap> GetVietQrBitmapAsync(decimal amount, string tableName)
+        {
+            var res = await SendRequestAsync(MsgType.GET_VIETQR_REQ, new { Amount = amount, TableName = tableName }, 15000).ConfigureAwait(false);
+            var dto = DeserializeOrThrow<QrResponseDTO>(res);
+            byte[] bytes = Convert.FromBase64String(dto.Base64Png);
+            using (MemoryStream ms = new MemoryStream(bytes))
+            using (Image img = Image.FromStream(ms))
+                return new Bitmap(img);
+        }
+
+        public DataTable GetPendingKitchenItems()
+        {
+            var res = SendRequestAsync(MsgType.GET_PENDING_KDS_REQ).GetAwaiter().GetResult();
+            var items = DeserializeOrThrow<List<KitchenItemDTO>>(res);
+
+            DataTable dt = new DataTable();
+            dt.Columns.Add("Mã", typeof(int));
+            dt.Columns.Add("Bàn / Đơn", typeof(string));
+            dt.Columns.Add("Tên món cần pha", typeof(string));
+            dt.Columns.Add("Số lượng", typeof(int));
+            dt.Columns.Add("Giờ gọi", typeof(string));
+            dt.Columns.Add("Trạng thái", typeof(string));
+
+            foreach (var it in items)
+                dt.Rows.Add(it.BillDetailId, it.TableName, it.ProductName, it.Quantity, it.OrderTime, it.KitchenStatus);
+            return dt;
+        }
+
+        public async Task MarkKitchenItemDoneAsync(int billDetailId, string tableName, string productName)
+        {
+            var res = await SendRequestAsync(MsgType.KDS_COMPLETE_ITEM_REQ, new { BillDetailId = billDetailId }).ConfigureAwait(false);
+            if (!res.Success) throw new Exception(res.Message);
+            await SendChatAsync($"✅ [Quầy Pha Chế]: Đã làm xong [{productName}] cho [{tableName}]!").ConfigureAwait(false);
+        }
+
+        public async Task SendChatAsync(string text)
+        {
+            try { await SendRequestAsync(MsgType.CHAT_MESSAGE, new { Text = text }).ConfigureAwait(false); }
             catch { }
         }
 
-        private static async Task<int> ReadExactAsync(NetworkStream s, byte[] buf, int count)
+        public void ShowInAppChatAndStatsDialog(Form parentForm, string currentRoleName = "Nhân viên")
         {
-            int total = 0;
-            while (total < count)
+            if (_activeChatForm != null && !_activeChatForm.IsDisposed)
             {
-                int r = await s.ReadAsync(buf, total, count - total);
-                if (r <= 0) return total;
-                total += r;
+                _activeChatForm.BringToFront();
+                return;
             }
-            return total;
-        }
 
-        // Xử lý lệnh tra cứu thống kê (/homnay, /homqua, /ban, /huymon) ngay trên App Chat qua TCP
-        private static string BuildStatsReportForAppChat(string rawCommand)
-        {
-            string cmd = rawCommand.Trim().ToLowerInvariant().Split(' ')[0];
-            try
+            Form f = new Form { Text = $"Chat nội bộ ({ServerHost}:{ServerPort})", Size = new Size(560, 440), StartPosition = FormStartPosition.CenterParent };
+            _activeChatForm = f;
+
+            RichTextBox rtb = new RichTextBox { Location = new Point(12, 12), Size = new Size(520, 330), ReadOnly = true };
+            TextBox txt = new TextBox { Location = new Point(12, 355), Size = new Size(410, 30) };
+            Button btn = new Button { Text = "Gửi", Location = new Point(430, 353), Size = new Size(102, 32) };
+
+            Action refresh = () =>
             {
-                if (cmd == "/homnay" || cmd == "/doanhthu")
-                {
-                    return QueryRevenueByDate(DateTime.Today, "HÔM NAY");
-                }
-                if (cmd == "/homqua")
-                {
-                    return QueryRevenueByDate(DateTime.Today.AddDays(-1), "HÔM QUA");
-                }
-                if (cmd == "/ban")
-                {
-                    DataTable dt = DatabaseHelper.ExecuteQuery(@"
-                        SELECT t.TableName, b.TotalAmount
-                        FROM Tables t
-                        INNER JOIN Bills b ON t.TableId = b.TableId
-                        WHERE b.Status = 0");
-                    if (dt.Rows.Count == 0) return "🤖 [BOT THỐNG KÊ APP]: 🟢 Hiện tại tất cả các bàn đều đang TRỐNG.";
+                lock (ChatHistory) rtb.Text = string.Join(Environment.NewLine, ChatHistory);
+                rtb.SelectionStart = rtb.Text.Length;
+                rtb.ScrollToCaret();
+            };
 
-                    StringBuilder sb = new StringBuilder();
-                    sb.AppendLine($"🤖 [BOT THỐNG KÊ APP] 🟠 ĐANG PHỤC VỤ {dt.Rows.Count} BÀN / ĐƠN:");
-                    foreach (DataRow r in dt.Rows)
-                    {
-                        sb.AppendLine($"  • {r["TableName"]}: tạm tính {Convert.ToDecimal(r["TotalAmount"]):N0} VNĐ");
-                    }
-                    return sb.ToString().TrimEnd();
-                }
-                if (cmd == "/huymon")
-                {
-                    DataTable dt = DatabaseHelper.ExecuteQuery(@"
-                        SELECT TOP 5 a.BillId, p.ProductName, a.DeletedQuantity, FORMAT(a.LogTime, 'HH:mm:ss') AS GioHuy
-                        FROM AuditLogs a
-                        LEFT JOIN Products p ON a.ProductId = p.ProductId
-                        WHERE CAST(a.LogTime AS DATE) = CAST(GETDATE() AS DATE)
-                        ORDER BY a.LogId DESC");
-                    if (dt.Rows.Count == 0) return "🤖 [BOT THỐNG KÊ APP]: ✅ Hôm nay quán không có thao tác hủy món nào.";
-
-                    StringBuilder sb = new StringBuilder();
-                    sb.AppendLine("🤖 [BOT THỐNG KÊ APP] ⚠️ LỊCH SỬ HỦY MÓN HÔM NAY:");
-                    foreach (DataRow row in dt.Rows)
-                    {
-                        sb.AppendLine($"  • Đơn #{row["BillId"]} | Món: {row["ProductName"]} | SL hủy: {row["DeletedQuantity"]} | Lúc: {row["GioHuy"]}");
-                    }
-                    return sb.ToString().TrimEnd();
-                }
-
-                return "🤖 [BOT THỐNG KÊ APP]: Các lệnh hỗ trợ: /homnay , /homqua , /ban , /huymon";
-            }
-            catch (Exception ex)
+            Action<MsgType, string> onEvt = (t, p) =>
             {
-                return "🤖 [BOT THỐNG KÊ APP] Lỗi truy vấn: " + ex.Message;
-            }
-        }
+                if (t == MsgType.CHAT_MESSAGE && !f.IsDisposed && f.IsHandleCreated)
+                    f.BeginInvoke(new Action(refresh));
+            };
 
-        private static string QueryRevenueByDate(DateTime date, string title)
-        {
-            var prms = new[] { new System.Data.SqlClient.SqlParameter("@Ngay", date.Date) };
-            DataTable dt = DatabaseHelper.ExecuteQuery(@"
-                SELECT COUNT(*) AS SoDon, ISNULL(SUM(TotalAmount), 0) AS TongTien
-                FROM Bills
-                WHERE Status = 1 AND CAST(CheckOutTime AS DATE) = @Ngay", prms);
+            OnServerEventReceived += onEvt;
+            f.FormClosing += (s, e) => OnServerEventReceived -= onEvt;
+            btn.Click += async (s, e) =>
+            {
+                if (string.IsNullOrWhiteSpace(txt.Text)) return;
+                string msg = $"[{currentRoleName} - {DateTime.Now:HH:mm}]: {txt.Text.Trim()}";
+                txt.Clear();
+                await SendChatAsync(msg);
+            };
 
-            int soDon = Convert.ToInt32(dt.Rows[0]["SoDon"]);
-            decimal tong = Convert.ToDecimal(dt.Rows[0]["TongTien"]);
-            return $"🤖 [BOT THỐNG KÊ APP] 📊 DOANH THU {title} ({date:dd/MM/yyyy}): Tổng {soDon} đơn — Tổng thu: {tong:N0} VNĐ";
+            f.Controls.AddRange(new Control[] { rtb, txt, btn });
+            refresh();
+            f.Show(parentForm);
         }
     }
 }
