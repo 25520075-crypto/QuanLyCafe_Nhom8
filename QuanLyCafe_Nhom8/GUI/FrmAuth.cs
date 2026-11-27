@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
@@ -17,9 +18,9 @@ namespace QuanLyCafe_Nhom8.GUI
         private readonly UserProxyService _userProxy = new UserProxyService();
 
         // Trạng thái OTP Quên mật khẩu
-        private string _forgotOtp = "";
+        
         private string _forgotEmail = "";
-        private DateTime _forgotOtpExpiry;
+        
 
         // Các Panel 3D chống nháy (Double-Buffered)
         private BufferedPanel pnlLeft3DStage;
@@ -997,8 +998,7 @@ namespace QuanLyCafe_Nhom8.GUI
             path.CloseFigure();
             return path;
         }
-
-        // ==================== 6. XỬ LÝ NGHIỆP VỤ ĐĂNG NHẬP, OTP GMAIL & PHÂN QUYỀN POS ====================
+            // ==================== 6. XỬ LÝ NGHIỆP VỤ ĐĂNG NHẬP, OTP GMAIL & PHÂN QUYỀN POS ====================
         private async void PerformLogin()
         {
             string u = txtLoginUser.Text.Trim();
@@ -1014,7 +1014,7 @@ namespace QuanLyCafe_Nhom8.GUI
             try
             {
                 NetworkClient.Instance.Start();
-                Protocol.UserDTO user = await NetworkClient.Instance.LoginAsync(u, p);
+                Protocol.UserDTO user = await _userProxy.LoginAsync(u, p);
                 if (user != null)
                 {
                     FrmMainPOS frmPos = new FrmMainPOS();
@@ -1031,12 +1031,12 @@ namespace QuanLyCafe_Nhom8.GUI
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Lỗi khi mở màn hình POS:\n" + ex.ToString(), "Lỗi hệ thống", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Lỗi khi mở màn hình POS:\n" + ex.Message, "Lỗi hệ thống", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
         // Gắn thanh Phân quyền & Cấp tài khoản Nhân viên (có xác thực OTP Gmail) lên Header của FrmMainPOS
-        private void AttachRoleAndAdminToolsToPOS(FrmMainPOS frmPos, UserDTO user)
+        private void AttachRoleAndAdminToolsToPOS(FrmMainPOS frmPos, Protocol.UserDTO user)
         {
             bool isAdmin = user.Role.Equals("Admin", StringComparison.OrdinalIgnoreCase);
             string roleVi = isAdmin ? "Quản lý (Admin)" : "Thu ngân (Staff)";
@@ -1133,13 +1133,10 @@ namespace QuanLyCafe_Nhom8.GUI
             }
         }
 
-        // Cửa sổ dành riêng cho Admin: Cấp tài khoản mới & Xác thực OTP Gmail
-        // Cửa sổ dành riêng cho Admin: Cấp tài khoản mới, Xóa nhân viên & Khóa/Mở khóa
+        // Cửa sổ dành riêng cho Admin: Cấp tài khoản mới, Xóa nhân viên & Khóa/Mở khóa qua NetworkClient
         private void ShowAdminUserManagementDialog(Form parentForm)
         {
-            string pendingOtp = "";
             string pendingEmail = "";
-            DateTime pendingExpiry = DateTime.MinValue;
 
             using (Form frmAdmin = new Form())
             {
@@ -1187,7 +1184,193 @@ namespace QuanLyCafe_Nhom8.GUI
                 };
 
                 TextBox txtU = MakeDarkInput(20, 78, 365);
-                TextBox txtFn = MakeDarkInput(20, 138, 365);
+                TextBox txtFn = MakeDarkInput(20        // ==================== 6. XỬ LÝ NGHIỆP VỤ ĐĂNG NHẬP, OTP GMAIL & PHÂN QUYỀN POS ====================
+        private async void PerformLogin()
+        {
+            string u = txtLoginUser.Text.Trim();
+            string p = txtLoginPass.Text.Trim();
+
+            if (string.IsNullOrEmpty(u) || string.IsNullOrEmpty(p))
+            {
+                MessageBox.Show("Vui lòng nhập Tên đăng nhập và Mật khẩu trước khi chạm vào Ly Cafe 3D hoặc bấm Đăng nhập!", "Thông báo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                txtLoginUser.Focus();
+                return;
+            }
+
+            try
+            {
+                NetworkClient.Instance.Start();
+                Protocol.UserDTO user = await _userProxy.LoginAsync(u, p);
+                if (user != null)
+                {
+                    FrmMainPOS frmPos = new FrmMainPOS();
+                    AttachRoleAndAdminToolsToPOS(frmPos, user);
+                    frmPos.Show();
+
+                    _renderTimer.Stop();
+                    this.Hide();
+                }
+                else
+                {
+                    MessageBox.Show("Sai tên đăng nhập, mật khẩu hoặc tài khoản đã bị vô hiệu hóa!", "Từ chối truy cập", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Lỗi khi mở màn hình POS:\n" + ex.Message, "Lỗi hệ thống", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Gắn thanh Phân quyền & Cấp tài khoản Nhân viên (có xác thực OTP Gmail) lên Header của FrmMainPOS
+        private void AttachRoleAndAdminToolsToPOS(FrmMainPOS frmPos, Protocol.UserDTO user)
+        {
+            bool isAdmin = user.Role.Equals("Admin", StringComparison.OrdinalIgnoreCase);
+            string roleVi = isAdmin ? "Quản lý (Admin)" : "Thu ngân (Staff)";
+
+            frmPos.Text = $"Hệ thống Quản lý Quán Cafe Thông Minh - Nhóm 8 | Ca trực: {user.FullName} [{roleVi}]";
+
+            Panel pnlTopHeader = null;
+            foreach (Control c in frmPos.Controls)
+            {
+                if (c is Panel p && p.Dock == DockStyle.Top)
+                {
+                    pnlTopHeader = p;
+                    break;
+                }
+            }
+
+            if (pnlTopHeader != null)
+            {
+                foreach (Control c in pnlTopHeader.Controls)
+                {
+                    if (c is Button btn)
+                    {
+                        if (btn.Text.Contains("Màn hình Pha chế"))
+                        {
+                            btn.Location = new Point(355, 11);
+                            btn.Size = new Size(175, 38);
+                        }
+                        else if (btn.Text.Contains("Quản lý Thực đơn"))
+                        {
+                            btn.Location = new Point(540, 11);
+                            btn.Size = new Size(175, 38);
+                            btn.Enabled = isAdmin;
+                            if (!isAdmin) btn.Text = "🔒 Thực đơn (Admin)";
+                        }
+                        else if (btn.Text.Contains("Thống kê"))
+                        {
+                            btn.Location = new Point(725, 11);
+                            btn.Size = new Size(185, 38);
+                            btn.Enabled = isAdmin;
+                            if (!isAdmin) btn.Text = "🔒 Thống kê (Admin)";
+                        }
+                    }
+                }
+
+                Button btnManageUsers = new Button
+                {
+                    Text = isAdmin ? "👥 Cấp TK Nhân viên (Admin)" : "🔒 Cấp TK (Chỉ Admin)",
+                    Location = new Point(920, 11),
+                    Size = new Size(215, 38),
+                    BackColor = isAdmin ? Color.FromArgb(142, 68, 173) : Color.FromArgb(120, 110, 105),
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                    Cursor = isAdmin ? Cursors.Hand : Cursors.No,
+                    Enabled = isAdmin
+                };
+                btnManageUsers.FlatAppearance.BorderSize = 0;
+                btnManageUsers.Click += (s, e) => ShowAdminUserManagementDialog(frmPos);
+
+                Button btnLogout = new Button
+                {
+                    Text = $"🚪 Đăng xuất ({user.Username})",
+                    Location = new Point(1145, 11),
+                    Size = new Size(175, 38),
+                    BackColor = Color.FromArgb(192, 57, 43),
+                    ForeColor = Color.White,
+                    FlatStyle = FlatStyle.Flat,
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                    Cursor = Cursors.Hand
+                };
+                btnLogout.FlatAppearance.BorderSize = 0;
+
+                bool isLoggingOut = false;
+                btnLogout.Click += (s, e) =>
+                {
+                    if (MessageBox.Show("Bạn có chắc muốn đăng xuất khỏi ca trực hiện tại?", "Xác nhận đổi ca",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                    {
+                        isLoggingOut = true;
+                        frmPos.Close();
+                        txtLoginPass.Clear();
+                        this.Show();
+                        _renderTimer.Start();
+                    }
+                };
+
+                frmPos.FormClosed += (s, e) =>
+                {
+                    if (!isLoggingOut) Application.Exit();
+                };
+
+                pnlTopHeader.Controls.Add(btnManageUsers);
+                pnlTopHeader.Controls.Add(btnLogout);
+            }
+        }
+
+        // Cửa sổ dành riêng cho Admin: Cấp tài khoản mới, Xóa nhân viên & Khóa/Mở khóa qua NetworkClient
+        private void ShowAdminUserManagementDialog(Form parentForm)
+        {
+            string pendingEmail = "";
+
+            using (Form frmAdmin = new Form())
+            {
+                frmAdmin.Text = "Quản lý Nhân sự: Cấp mới, Xóa & Phân quyền Tài khoản (Quyền Admin)";
+                frmAdmin.Size = new Size(980, 560);
+                frmAdmin.StartPosition = FormStartPosition.CenterParent;
+                frmAdmin.FormBorderStyle = FormBorderStyle.FixedDialog;
+                frmAdmin.MaximizeBox = false;
+                frmAdmin.BackColor = Color.FromArgb(38, 24, 18);
+
+                Panel pnlCreate = new Panel
+                {
+                    Location = new Point(15, 15),
+                    Size = new Size(410, 490),
+                    BackColor = Color.FromArgb(54, 34, 26)
+                };
+
+                Label lblHeader = new Label
+                {
+                    Text = "✨ CẤP TÀI KHOẢN NHÂN VIÊN MỚI",
+                    Font = new Font("Segoe UI", 12.5f, FontStyle.Bold),
+                    ForeColor = Color.FromArgb(255, 204, 128),
+                    Location = new Point(20, 15),
+                    AutoSize = true
+                };
+
+                Label MakeDarkLabel(string txt, int x, int y) => new Label
+                {
+                    Text = txt,
+                    Location = new Point(x, y),
+                    AutoSize = true,
+                    Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                    ForeColor = Color.FromArgb(245, 225, 210)
+                };
+
+                TextBox MakeDarkInput(int x, int y, int w, bool isPass = false) => new TextBox
+                {
+                    Location = new Point(x, y),
+                    Size = new Size(w, 28),
+                    Font = new Font("Segoe UI", 10.5f),
+                    BackColor = Color.FromArgb(28, 17, 13),
+                    ForeColor = Color.White,
+                    BorderStyle = BorderStyle.FixedSingle,
+                    UseSystemPasswordChar = isPass
+                };
+
+                TextBox txtU = MakeDarkInput(20, 78, 365);
+                                TextBox txtFn = MakeDarkInput(20, 138, 365);
                 TextBox txtPass = MakeDarkInput(20, 198, 215, true);
 
                 ComboBox cboRole = new ComboBox
@@ -1233,7 +1416,6 @@ namespace QuanLyCafe_Nhom8.GUI
                 };
                 btnCreateAccount.FlatAppearance.BorderSize = 0;
 
-                // Cột phải: Bảng danh sách nhân sự + Nút Xóa & Khóa tài khoản
                 DataGridView dgvUsers = new DataGridView
                 {
                     Location = new Point(440, 15),
@@ -1273,11 +1455,36 @@ namespace QuanLyCafe_Nhom8.GUI
                 };
                 btnToggleActive.FlatAppearance.BorderSize = 0;
 
-                Action reloadGrid = () => dgvUsers.DataSource = _userDal.GetAllUsers();
-                reloadGrid();
+                Func<Task> reloadGridAsync = async () =>
+                {
+                    try
+                    {
+                        var users = await _userProxy.GetAllUsersAsync();
+                        DataTable dt = new DataTable();
+                                                dt.Columns.Add("Mã NV", typeof(int));
+                        dt.Columns.Add("Tài khoản", typeof(string));
+                        dt.Columns.Add("Họ và tên", typeof(string));
+                        dt.Columns.Add("Chức vụ", typeof(string));
+                        dt.Columns.Add("Email", typeof(string));
+                        dt.Columns.Add("Đang hoạt động", typeof(bool));
 
-                // SỰ KIỆN XÓA NHÂN VIÊN ĐANG CHỌN
-                btnDeleteStaff.Click += (s, e) =>
+                        if (users != null)
+                        {
+                            foreach (var item in users)
+                                dt.Rows.Add(item.UserId, item.Username, item.FullName, item.Role, item.Email, item.IsActive);
+                        }
+                        dgvUsers.DataSource = dt;
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("Lỗi tải danh sách nhân sự từ Server: " + ex.Message);
+                    }
+                };
+
+                frmAdmin.Load += async (s, e) => await reloadGridAsync();
+
+                // SỰ KIỆN XÓA NHÂN VIÊN QUA SERVER
+                btnDeleteStaff.Click += async (s, e) =>
                 {
                     if (dgvUsers.CurrentRow == null)
                     {
@@ -1289,7 +1496,6 @@ namespace QuanLyCafe_Nhom8.GUI
                     string username = dgvUsers.CurrentRow.Cells["Tài khoản"].Value.ToString();
                     string fullName = dgvUsers.CurrentRow.Cells["Họ và tên"].Value.ToString();
 
-                    // Chặn xóa tài khoản admin gốc hoặc tài khoản đang đăng nhập hiện tại
                     if (username.Equals("admin", StringComparison.OrdinalIgnoreCase) ||
                         username.Equals(txtLoginUser.Text.Trim(), StringComparison.OrdinalIgnoreCase))
                     {
@@ -1307,21 +1513,26 @@ namespace QuanLyCafe_Nhom8.GUI
                     {
                         try
                         {
-                            if (_userDal.DeleteUser(userId))
+                            var res = await _userProxy.DeleteUserAsync(userId);
+                            if (res.Success)
                             {
                                 MessageBox.Show($"Đã xóa nhân viên [{fullName} - {username}] khỏi hệ thống!", "Đã xóa", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                                reloadGrid();
+                                await reloadGridAsync();
+                            }
+                            else
+                            {
+                                MessageBox.Show(res.Message, "Từ chối xóa", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                             }
                         }
                         catch (Exception ex)
                         {
-                            MessageBox.Show("Lỗi khi xóa nhân viên: " + ex.Message, "Lỗi SQL", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            MessageBox.Show("Lỗi khi xóa nhân viên: " + ex.Message, "Lỗi Server", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         }
                     }
                 };
 
-                // SỰ KIỆN KHÓA / MỞ KHÓA TÀI KHOẢN TẠM THỜI
-                btnToggleActive.Click += (s, e) =>
+                // SỰ KIỆN KHÓA / MỞ KHÓA TÀI KHOẢN QUA SERVER
+                btnToggleActive.Click += async (s, e) =>
                 {
                     if (dgvUsers.CurrentRow == null)
                     {
@@ -1340,16 +1551,28 @@ namespace QuanLyCafe_Nhom8.GUI
                         return;
                     }
 
-                    if (_userDal.ToggleUserActiveStatus(userId, isActive))
+                    try
                     {
-                        string statusText = !isActive ? "MỞ KHÓA (Hoạt động trở lại)" : "KHÓA (Ngừng truy cập)";
-                        MessageBox.Show($"Đã chuyển trạng thái tài khoản [{username}] sang: {statusText}!", "Cập nhật thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        reloadGrid();
+                        var res = await _userProxy.ToggleUserStatusAsync(userId);
+                        if (res.Success)
+                        {
+                            string statusText = !isActive ? "MỞ KHÓA (Hoạt động trở lại)" : "KHÓA (Ngừng truy cập)";
+                            MessageBox.Show($"Đã chuyển trạng thái tài khoản [{username}] sang: {statusText}!", "Cập nhật thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            await reloadGridAsync();
+                        }
+                        else
+                        {
+                            MessageBox.Show(res.Message, "Lỗi cập nhật", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("Lỗi kết nối Server: " + ex.Message);
                     }
                 };
 
-                // SỰ KIỆN GỬI OTP TẠO MỚI
-                btnSendVerifyOtp.Click += (s, e) =>
+                // SỰ KIỆN GỬI OTP TẠO MỚI QUA SERVER
+                btnSendVerifyOtp.Click += async (s, e) =>
                 {
                     string u = txtU.Text.Trim();
                     string em = txtMail.Text.Trim();
@@ -1367,82 +1590,101 @@ namespace QuanLyCafe_Nhom8.GUI
                         return;
                     }
 
-                    if (_userDal.IsUsernameOrEmailExist(u, em))
+                    btnSendVerifyOtp.Enabled = false;
+                    try
                     {
-                        MessageBox.Show("Tên đăng nhập hoặc địa chỉ Gmail này đã tồn tại!", "Trùng dữ liệu", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
+                        var res = await _userProxy.SendCreateUserOtpAsync(em);
+                        if (res.Success)
+                        {
+                                                        pendingEmail = em;
+                            MessageBox.Show(string.IsNullOrWhiteSpace(res.Message)
+                                ? $"Server đã gửi mã OTP gồm 6 chữ số tới Gmail [{em}]!\nHãy nhập mã OTP để hoàn tất tạo tài khoản."
+                                : res.Message, "Đã gửi OTP", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
-                    pendingOtp = AuthService.GenerateOTP();
-                    pendingEmail = em;
-                    pendingExpiry = DateTime.Now.AddMinutes(5);
-
-                    if (AuthService.SendOtpEmail(em, pendingOtp, $"Xác thực liên kết tài khoản mới [{u}]", out string err))
-                    {
-                        if (!string.IsNullOrEmpty(err))
-                            MessageBox.Show(err, "Thông tin OTP", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            txtVerifyOtp.Enabled = true;
+                            btnCreateAccount.Enabled = true;
+                            txtVerifyOtp.Focus();
+                        }
                         else
-                            MessageBox.Show($"Đã gửi mã OTP gồm 6 chữ số tới Gmail [{em}]!\nHãy nhập mã OTP để hoàn tất tạo tài khoản.", "Đã gửi OTP", MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-                        txtVerifyOtp.Enabled = true;
-                        btnCreateAccount.Enabled = true;
-                        txtVerifyOtp.Focus();
+                        {
+                            MessageBox.Show("Server từ chối gửi OTP:\n" + res.Message, "Lỗi gửi OTP", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        MessageBox.Show("Lỗi khi gửi mail OTP:\n" + err, "Lỗi SMTP Gmail", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show("Lỗi kết nối Server khi gửi OTP:\n" + ex.Message, "Lỗi mạng", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                    finally
+                    {
+                        btnSendVerifyOtp.Enabled = true;
                     }
                 };
 
-                // SỰ KIỆN XÁC NHẬN OTP & LƯU TÀI KHOẢN MỚI
-                btnCreateAccount.Click += (s, e) =>
+                // SỰ KIỆN XÁC NHẬN OTP & LƯU TÀI KHOẢN MỚI QUA SERVER
+                btnCreateAccount.Click += async (s, e) =>
                 {
-                    if (DateTime.Now > pendingExpiry)
+                    string otp = txtVerifyOtp.Text.Trim();
+                    if (string.IsNullOrEmpty(otp) || txtMail.Text.Trim() != pendingEmail)
                     {
-                        MessageBox.Show("Mã OTP đã hết hạn (quá 5 phút)! Vui lòng bấm Gửi OTP lại.", "Hết hạn", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
-
-                    if (txtVerifyOtp.Text.Trim() != pendingOtp || txtMail.Text.Trim() != pendingEmail)
-                    {
-                        MessageBox.Show("Mã OTP không chính xác hoặc Gmail đã bị thay đổi!", "Sai OTP", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show("Vui lòng nhập mã OTP vừa nhận và không thay đổi địa chỉ Gmail!", "Sai thông tin", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
 
                     string role = cboRole.SelectedItem.ToString();
-                    if (_userDal.CreateAccountByAdmin(txtU.Text, txtPass.Text, txtFn.Text, role, pendingEmail))
+                    btnCreateAccount.Enabled = false;
+                    try
                     {
-                        MessageBox.Show($"Đã tạo thành công tài khoản [{txtU.Text.Trim()}] với quyền [{role}]!", "Hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        txtU.Clear();
-                        txtFn.Clear();
-                        txtPass.Clear();
-                        txtMail.Clear();
-                        txtVerifyOtp.Clear();
-                        txtVerifyOtp.Enabled = false;
-                        btnCreateAccount.Enabled = false;
-                        pendingOtp = "";
-                        reloadGrid();
+                        var res = await _userProxy.CreateUserAsync(
+                            txtU.Text.Trim(),
+                            txtPass.Text.Trim(),
+                            txtFn.Text.Trim(),
+                            pendingEmail,
+                            role,
+                            otp);
+
+                        if (res.Success)
+                        {
+                            MessageBox.Show($"Đã tạo thành công tài khoản [{txtU.Text.Trim()}] với quyền [{role}]!", "Hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            txtU.Clear();
+                            txtFn.Clear();
+                            txtPass.Clear();
+                            txtMail.Clear();
+                            txtVerifyOtp.Clear();
+                            txtVerifyOtp.Enabled = false;
+                            pendingEmail = "";
+                            await reloadGridAsync();
+                        }
+                        else
+                        {
+                            MessageBox.Show("Tạo tài khoản thất bại:\n" + res.Message, "Lỗi xác thực", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            btnCreateAccount.Enabled = true;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show("Lỗi kết nối Server:\n" + ex.Message, "Lỗi mạng", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        btnCreateAccount.Enabled = true;
                     }
                 };
 
                 pnlCreate.Controls.AddRange(new Control[]
                 {
-            lblHeader,
-            MakeDarkLabel("Tên đăng nhập (*):", 20, 55), txtU,
-            MakeDarkLabel("Họ và tên nhân viên (*):", 20, 115), txtFn,
-            MakeDarkLabel("Mật khẩu khởi tạo (*):", 20, 175), txtPass,
-            MakeDarkLabel("Phân quyền:", 245, 175), cboRole,
-            MakeDarkLabel("Gmail nhận OTP xác thực (*):", 20, 238), txtMail, btnSendVerifyOtp,
-            MakeDarkLabel("Nhập mã OTP 6 số từ Gmail (*):", 20, 305), txtVerifyOtp,
-            btnCreateAccount
+                    lblHeader,
+                    MakeDarkLabel("Tên đăng nhập (*):", 20, 55), txtU,
+                    MakeDarkLabel("Họ và tên nhân viên (*):", 20, 115), txtFn,
+                    MakeDarkLabel("Mật khẩu khởi tạo (*):", 20, 175), txtPass,
+                    MakeDarkLabel("Phân quyền:", 245, 175), cboRole,
+                    MakeDarkLabel("Gmail nhận OTP xác thực (*):", 20, 238), txtMail, btnSendVerifyOtp,
+                    MakeDarkLabel("Nhập mã OTP 6 số từ Gmail (*):", 20, 305), txtVerifyOtp,
+                    btnCreateAccount
                 });
 
                 frmAdmin.Controls.AddRange(new Control[] { pnlCreate, dgvUsers, btnDeleteStaff, btnToggleActive });
-                frmAdmin.ShowDialog(parentForm);
+                                frmAdmin.ShowDialog(parentForm);
             }
         }
 
-        private void BtnSendForgotOtp_Click(object sender, EventArgs e)
+        private async void BtnSendForgotOtp_Click(object sender, EventArgs e)
         {
             string email = txtForgotEmail.Text.Trim();
             if (string.IsNullOrEmpty(email))
@@ -1451,24 +1693,17 @@ namespace QuanLyCafe_Nhom8.GUI
                 return;
             }
 
+            btnSendOtp3D.Enabled = false;
             try
             {
-                if (!_userDal.CheckEmailExist(email))
+                NetworkClient.Instance.Start();
+                var res = await _userProxy.SendForgotOtpAsync(email);
+                if (res.Success)
                 {
-                    MessageBox.Show("Gmail này chưa được liên kết với tài khoản nào trong hệ thống!", "Không tìm thấy", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                _forgotOtp = AuthService.GenerateOTP();
-                _forgotEmail = email;
-                _forgotOtpExpiry = DateTime.Now.AddMinutes(5);
-
-                if (AuthService.SendOtpEmail(email, _forgotOtp, "Khôi phục mật khẩu", out string err))
-                {
-                    if (!string.IsNullOrEmpty(err))
-                        MessageBox.Show(err, "Thông tin OTP", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    else
-                        MessageBox.Show("Đã gửi mã OTP gồm 6 chữ số tới Gmail của bạn! Vui lòng kiểm tra hộp thư.", "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    _forgotEmail = email;
+                    MessageBox.Show(string.IsNullOrWhiteSpace(res.Message)
+                        ? "Server đã gửi mã OTP gồm 6 chữ số tới Gmail của bạn! Vui lòng kiểm tra hộp thư."
+                        : res.Message, "Thành công", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
                     txtOtpCode.Enabled = true;
                     txtNewPass.Enabled = true;
@@ -1478,29 +1713,28 @@ namespace QuanLyCafe_Nhom8.GUI
                 }
                 else
                 {
-                    MessageBox.Show("Không thể gửi email:\n" + err, "Lỗi SMTP", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(res.Message, "Không thể gửi OTP", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Lỗi: " + ex.Message, "Lỗi", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Lỗi kết nối Server: " + ex.Message, "Lỗi mạng", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                btnSendOtp3D.Enabled = true;
+                btnSendOtp3D.Invalidate();
             }
         }
 
-        private void BtnConfirmReset_Click(object sender, EventArgs e)
+        private async void BtnConfirmReset_Click(object sender, EventArgs e)
         {
             string inputOtp = txtOtpCode.Text.Trim();
             string newPass = txtNewPass.Text.Trim();
 
-            if (DateTime.Now > _forgotOtpExpiry)
+            if (string.IsNullOrEmpty(inputOtp))
             {
-                MessageBox.Show("Mã OTP đã hết hạn (quá 5 phút)! Vui lòng bấm gửi lại.", "Hết hạn", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (inputOtp != _forgotOtp)
-            {
-                MessageBox.Show("Mã OTP không chính xác! Vui lòng kiểm tra lại.", "Sai OTP", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("Vui lòng nhập mã OTP từ Gmail!", "Thiếu OTP", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -1510,13 +1744,32 @@ namespace QuanLyCafe_Nhom8.GUI
                 return;
             }
 
-            if (_userDal.UpdatePasswordByEmail(_forgotEmail, newPass))
+            btnConfirmReset3D.Enabled = false;
+            try
             {
-                MessageBox.Show("Đổi mật khẩu thành công! Mời bạn đăng nhập lại.", "Hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                _forgotOtp = "";
-                txtOtpCode.Clear();
-                txtNewPass.Clear();
-                ShowCard(pnlLoginCard);
+                var res = await _userProxy.ResetPasswordWithOtpAsync(_forgotEmail, inputOtp, newPass);
+                if (res.Success)
+                {
+                    MessageBox.Show("Đổi mật khẩu thành công! Mời bạn đăng nhập lại.", "Hoàn tất", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    _forgotEmail = "";
+                    txtOtpCode.Clear();
+                    txtNewPass.Clear();
+                    txtOtpCode.Enabled = false;
+                    txtNewPass.Enabled = false;
+                    ShowCard(pnlLoginCard);
+                }
+                else
+                {
+                    MessageBox.Show(res.Message, "Đổi mật khẩu thất bại", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    btnConfirmReset3D.Enabled = true;
+                    btnConfirmReset3D.Invalidate();
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Lỗi kết nối Server: " + ex.Message, "Lỗi mạng", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                btnConfirmReset3D.Enabled = true;
+                btnConfirmReset3D.Invalidate();
             }
         }
 
@@ -1529,19 +1782,23 @@ namespace QuanLyCafe_Nhom8.GUI
         private void InitializeComponent()
         {
             this.SuspendLayout();
-            // 
-            // FrmAuth
-            // 
             this.ClientSize = new System.Drawing.Size(282, 253);
             this.Name = "FrmAuth";
             this.Load += new System.EventHandler(this.FrmAuth_Load);
             this.ResumeLayout(false);
-
         }
 
         private void FrmAuth_Load(object sender, EventArgs e)
         {
-                
         }
     }
 }
+}
+
+
+                            
+                
+
+
+                                                            
+                
